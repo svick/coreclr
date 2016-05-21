@@ -129,7 +129,8 @@ For the purposes of this demo, you need to copy a few required assemblies to the
 	C:\git\corefx>copy bin\Windows_NT.AnyCPU.Debug\System.IO\System.IO.dll \coreclr-demo\runtime
 	C:\git\corefx>copy bin\Windows_NT.AnyCPU.Debug\System.IO.FileSystem.Primitives\System.IO.FileSystem.Primitives.dll \coreclr-demo\runtime
 	C:\git\corefx>copy bin\Windows_NT.AnyCPU.Debug\System.Runtime\System.Runtime.dll \coreclr-demo\runtime
-	C:\git\corefx>copy bin\Windows_NT.AnyCPU.Debug\System.Runtime.Extensions\System.Runtime.Extensions.dll \coreclr-demo\runtime	C:\git\corefx>copy bin\Windows_NT.AnyCPU.Debug\System.Runtime.InteropServices\System.Runtime.InteropServices.dll \coreclr-demo\runtime
+	C:\git\corefx>copy bin\Windows_NT.AnyCPU.Debug\System.Runtime.Extensions\System.Runtime.Extensions.dll \coreclr-demo\runtime
+	C:\git\corefx>copy bin\Windows_NT.AnyCPU.Debug\System.Runtime.InteropServices\System.Runtime.InteropServices.dll \coreclr-demo\runtime
 	C:\git\corefx>copy bin\Windows_NT.AnyCPU.Debug\System.Threading.Tasks\System.Threading.Tasks.dll \coreclr-demo\runtime	
 
 Restore NuGet Packages
