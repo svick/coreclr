@@ -4504,6 +4504,9 @@ private:
                                                      GenTreePtr       tmpAssignmentInsertionPoint,
                                                      GenTreePtr       paramAssignmentInsertionPoint);
     static int fgEstimateCallStackSize(GenTreeCall* call);
+    GenTreeStmt* fgFindDelegateAllocation(GenTreeStmt* delegateCtorCall, GenTreeLclVar* var);
+    GenTreeStmt* fgFindDelegateCtorCall(GenTreeLclVar* var, GenTreeIntCon*& functionAddress, GenTreePtr& delegateTarget);
+    GenTreePtr fgInlineDelegates(GenTreeCall* call);
     GenTreePtr fgMorphCall(GenTreeCall* call);
     void fgMorphCallInline(GenTreeCall* call, InlineResult* result);
     void fgMorphCallInlineHelper(GenTreeCall* call, InlineResult* result);
@@ -4814,7 +4817,7 @@ private:
     void optOptimizeBoolsGcStress(BasicBlock* condBlock);
 #endif
 public:
-    void optOptimizeLayout(); // Optimize the BasicBlock layout of the method
+        void optOptimizeLayout(); // Optimize the BasicBlock layout of the method
 
     void optOptimizeLoops(); // for "while-do" loops duplicates simple loop conditions and transforms
                              // the loop into a "do-while" loop

@@ -7306,6 +7306,154 @@ GenTreePtr Compiler::fgAssignRecursiveCallArgToCallerParam(GenTreePtr       arg,
     return paramAssignStmt;
 }
 
+GenTreeStmt* Compiler::fgFindDelegateAllocation(GenTreeStmt* delegateCtorCall, GenTreeLclVar* var)
+{
+    for (auto prevTree = delegateCtorCall->gtPrev; prevTree->gtNext != nullptr; prevTree = prevTree->gtPrev)
+    {
+        if (prevTree->IsStatement())
+        {
+            auto prevStatement = prevTree->AsStmt();
+            auto prevExpression = prevStatement->gtStmtExpr;
+
+            //gtDispTree(prevExpression);
+
+            if (prevExpression->OperGet() == GT_ASG)
+            {
+                auto prevAssignment = prevExpression->AsOp();
+
+                if (prevAssignment->gtOp2->OperGet() == GT_ALLOCOBJ && prevAssignment->gtOp1->OperGet() == GT_LCL_VAR)
+                {
+                    auto prevVar = prevAssignment->gtOp1->AsLclVar();
+
+                    if (var->GetLclNum() == prevVar->GetLclNum())
+                    {
+                        return prevStatement;
+                    }
+                }
+            }
+        }
+    }
+
+    return nullptr;
+}
+
+GenTreeStmt* Compiler::fgFindDelegateCtorCall(GenTreeLclVar* var, GenTreeIntCon*& functionAddress, GenTreePtr& delegateTarget)
+{
+    for (auto prevTree = compCurStmt->gtPrev; prevTree->gtNext != nullptr; prevTree = prevTree->gtPrev)
+    {
+        if (!prevTree->IsStatement())
+            continue;
+
+        auto prevStatement = prevTree->AsStmt();
+        auto prevExpression = prevStatement->gtStmtExpr;
+
+        if (!prevExpression->IsCall())
+            continue;
+
+        auto prevCall = prevExpression->AsCall();
+
+        // TODO: test that it's delegate ctor
+
+        //gtDispTree(prevCall);
+
+        auto it = prevCall->gtCallLateArgs;
+
+        auto prevArg0 = it->Current();
+
+        it = it->Rest();
+        if (it == nullptr)
+            continue;
+
+        auto prevArg1 = it->Current();
+        //gtDispTree(prevArg);
+
+        it = it->Rest();
+        if (it == nullptr)
+            continue;
+
+        delegateTarget = it->Current();
+
+        if (prevArg1->OperGet() != GT_LCL_VAR)
+            continue;
+
+        auto prevVar = prevArg1->AsLclVar();
+
+        if (var->GetLclNum() != prevVar->GetLclNum())
+            continue;
+
+        if (prevArg0->OperGet() == GT_NOP)
+            prevArg0 = prevArg0->AsUnOp()->gtOp1;
+
+        if (prevArg0->OperGet() != GT_CNS_INT)
+            continue;
+
+        functionAddress = prevArg0->AsIntCon();
+
+
+
+        return prevStatement;
+    }
+
+    return nullptr;
+}
+
+#define disp(msg) printf(msg); printf("\n")
+#define dispTree(tree, msg) disp(msg); gtDispTree(tree)
+#define dispBlock(block, msg) disp(msg); fgDumpBlock(block)
+
+GenTreePtr Compiler::fgInlineDelegates(GenTreeCall* call)
+{
+    if (opts.disAsm)
+    {
+	for (auto it = call->gtCallArgs; it != nullptr; it = it->Rest())
+	{
+	    auto arg = it->Current();
+
+            //if (arg->IsLocal()) // ??
+            if (arg->OperGet() != GT_LCL_VAR)
+                continue;
+
+	    auto var = arg->AsLclVar();
+
+	    GenTreeIntCon* functionAddress;
+	    GenTreePtr delegateTarget;
+
+	    auto delegateCtorCall = fgFindDelegateCtorCall(var, functionAddress, delegateTarget);
+	    if (delegateCtorCall == nullptr)
+	        continue;
+
+	    auto delegateAllocation = fgFindDelegateAllocation(delegateCtorCall, var);
+	    if (delegateAllocation == nullptr)
+	        continue;
+
+	    dispTree(call, "main call");
+	    dispTree(var, "delegate var");
+	    dispTree(delegateCtorCall, "delegate ctor stmt");
+	    dispTree(delegateAllocation, "delegate alloc stmt");
+
+	    dispTree(functionAddress, "func addr");
+	    dispTree(delegateTarget, "delegate target");
+
+	    printf("\n");
+
+	    //dispBlock(compCurBB, "before");
+
+	    fgRemoveStmt(compCurBB, delegateCtorCall);
+	    fgRemoveStmt(compCurBB, delegateAllocation);
+
+	    //dispBlock(compCurBB, "after");
+
+            dispTree(call, "before");
+
+            it->Current() = delegateTarget;
+
+            dispTree(call, "after");
+	}
+    }
+
+    return nullptr;
+}
+
 /*****************************************************************************
  *
  *  Transform the given GT_CALL tree for code generation.
@@ -7313,6 +7461,12 @@ GenTreePtr Compiler::fgAssignRecursiveCallArgToCallerParam(GenTreePtr       arg,
 
 GenTreePtr Compiler::fgMorphCall(GenTreeCall* call)
 {
+    auto inlineDelegatesResult = fgInlineDelegates(call);
+    if (inlineDelegatesResult != nullptr)
+    {
+	return fgMorphTree(inlineDelegatesResult);
+    }
+
     if (call->CanTailCall())
     {
         // It should either be an explicit (i.e. tail prefixed) or an implicit tail call
