@@ -124,14 +124,6 @@ public:
     {
         return m_RVA != 0;
     }
-#if defined(TARGET_THUMB2) && defined(BINDER)
-    virtual BOOL IsThumb2Code()
-    {
-        return FALSE;
-    }
-#else
-    __forceinline BOOL IsThumb2Code() { return false;}
-#endif
 };
 
 //---------------------------------------------------------------------------------------
@@ -320,11 +312,11 @@ class ZapWriter : public IStream
 
     BOOL Is64Bit()
     {
-#ifdef _WIN64
+#ifdef _TARGET_64BIT_
         return TRUE;
-#else
+#else // !_TARGET_64BIT_
         return FALSE;
-#endif
+#endif // !_TARGET_64BIT_
     }
 
     USHORT GetMachine()

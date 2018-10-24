@@ -44,7 +44,7 @@
 //
 #ifdef _DEBUG
 
-#define LAST_ERROR_TRASH_VALUE 42424
+#define LAST_ERROR_TRASH_VALUE 42424 /* = 0xa5b8 */
 
 #define TRASH_LASTERROR \
     SetLastError(LAST_ERROR_TRASH_VALUE)
@@ -55,9 +55,7 @@
 
 #endif // _DEBUG
 
-#ifndef CLR_STANDALONE_BINDER
 IExecutionEngine *GetExecutionEngine();
-#endif
 IEEMemoryManager *GetEEMemoryManager();
 
 LPVOID ClrVirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect);
@@ -84,7 +82,6 @@ void ClrFlsAssociateCallback(DWORD slot, PTLS_CALLBACK_FUNCTION callback);
 typedef LPVOID* (*CLRFLSGETBLOCK)();
 extern CLRFLSGETBLOCK __ClrFlsGetBlock;
 
-#ifndef CLR_STANDALONE_BINDER
 // Combining getter/setter into a single call
 inline void ClrFlsIncrementValue(DWORD slot, int increment)
 {
@@ -193,7 +190,6 @@ inline void ClrFlsSetValue(DWORD slot, void *pData)
         END_PRESERVE_LAST_ERROR;
     }
 }
-#endif //!CLR_STANDALONE_BINDER
 
 typedef LPVOID (*FastAllocInProcessHeapFunc)(DWORD dwFlags, SIZE_T dwBytes);
 extern FastAllocInProcessHeapFunc __ClrAllocInProcessHeap;
@@ -368,9 +364,7 @@ private:
     SEMAPHORE_COOKIE m_semaphore;
 };
 
-#if defined(FEATURE_CORECLR) || !defined(SELF_NO_HOST) || defined(DACCESS_COMPILE)
 HMODULE GetCLRModule ();
-#endif // defined(FEATURE_CORECLR) || !defined(SELF_NO_HOST) || defined(DACCESS_COMPILE)
 
 #ifndef FEATURE_NO_HOST
 /*
@@ -611,7 +605,6 @@ public:
 
 // At places where want to allocate stress log, we need to first check if we are allowed to do so.
 // If ClrTlsInfo doesn't exist for this thread, we take it as can alloc
-#ifndef CLR_STANDALONE_BINDER
 inline bool IsInCantAllocRegion ()
 {
     size_t count = 0;
@@ -624,7 +617,6 @@ inline bool IsInCantAllocRegion ()
 }
 // for stress log the rule is more restrict, we have to check the global counter too
 extern BOOL IsInCantAllocStressLogRegion();
-#endif // !CLR_STANDALONE_BINDER
 
 #include "genericstackprobe.inl"
 

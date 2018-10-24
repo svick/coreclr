@@ -165,6 +165,9 @@ typedef enum ReplacesCorHdrNumericDefines
     COR_VTABLE_FROM_UNMANAGED_RETAIN_APPDOMAIN=0x08,    // NEW
     COR_VTABLE_CALL_MOST_DERIVED        =0x10,          // Call most derived method described by
 
+// EATJ constants
+    IMAGE_COR_EATJ_THUNK_SIZE           = 32,           // Size of a jump thunk reserved range.
+
 // Max name lengths    
     //@todo: Change to unlimited name lengths.
     MAX_CLASS_NAME                      =1024,
@@ -195,8 +198,8 @@ typedef enum ReplacesCorHdrNumericDefines
 // The most important of these is the MetaData tables.   The easiest way of looking at meta-data is using
 // the IlDasm.exe tool.   
 // 
-// MetaData holds most of the information in the IL image.  THe exceptions are resource blobs and the IL
-// instructions streams for individual methods.  Intstead the Meta-data for a method holds an RVA to a 
+// MetaData holds most of the information in the IL image.  The exceptions are resource blobs and the IL
+// instructions streams for individual methods.  Instead the Meta-data for a method holds an RVA to a
 // code:IMAGE_COR_ILMETHOD which holds all the IL stream (and exception handling information).  
 // 
 // Precompiled (NGEN) images use the same IMAGE_COR20_HEADER but also use the ManagedNativeHeader field to
@@ -641,6 +644,7 @@ typedef enum CorMethodImpl
     miNoInlining         =   0x0008,   // Method may not be inlined.
     miAggressiveInlining =   0x0100,   // Method should be inlined if possible.
     miNoOptimization     =   0x0040,   // Method may not be optimized.
+    miAggressiveOptimization = 0x0200, // Method may contain hot code and should be aggressively optimized.
 
     // These are the flags that are allowed in MethodImplAttribute's Value
     // property. This should include everything above except the code impl
@@ -648,7 +652,7 @@ typedef enum CorMethodImpl
     miUserMask           =   miManagedMask | miForwardRef | miPreserveSig |
                              miInternalCall | miSynchronized |
                              miNoInlining | miAggressiveInlining |
-                             miNoOptimization,
+                             miNoOptimization | miAggressiveOptimization,
 
     miMaxMethodImplVal   =   0xffff,   // Range check value
 } CorMethodImpl;
@@ -671,6 +675,7 @@ typedef enum CorMethodImpl
 #define IsMiNoInlining(x)                   ((x) & miNoInlining)
 #define IsMiAggressiveInlining(x)           ((x) & miAggressiveInlining)
 #define IsMiNoOptimization(x)               ((x) & miNoOptimization)
+#define IsMiAggressiveOptimization(x)       (((x) & (miAggressiveOptimization | miNoOptimization)) == miAggressiveOptimization)
 
 // PinvokeMap attr bits, used by DefinePinvokeMap.
 typedef enum  CorPinvokeMap
@@ -743,6 +748,7 @@ typedef enum CorAssemblyFlags
     afPA_IA64               =   0x0030,     // Processor Architecture: Itanium (PE32+)
     afPA_AMD64              =   0x0040,     // Processor Architecture: AMD X64 (PE32+)
     afPA_ARM                =   0x0050,     // Processor Architecture: ARM (PE32)
+    afPA_ARM64              =   0x0060,     // Processor Architecture: ARM64 (PE32+)
     afPA_NoPlatform         =   0x0070,      // applies to any platform but cannot run on any (e.g. reference assembly), should not have "specified" set
     afPA_Specified          =   0x0080,     // Propagate PA flags to AssemblyRef record
     afPA_Mask               =   0x0070,     // Bits describing the processor architecture
@@ -751,6 +757,7 @@ typedef enum CorAssemblyFlags
 
     afEnableJITcompileTracking   =  0x8000, // From "DebuggableAttribute".
     afDisableJITcompileOptimizer =  0x4000, // From "DebuggableAttribute".
+    afDebuggableAttributeMask    =  0xc000,
 
     afRetargetable          =   0x0100,     // The assembly can be retargeted (at runtime) to an
                                             //  assembly from a different publisher.
@@ -771,6 +778,7 @@ typedef enum CorAssemblyFlags
 #define IsAfPA_IA64(x) (((x) & afPA_Mask) == afPA_IA64)
 #define IsAfPA_AMD64(x) (((x) & afPA_Mask) == afPA_AMD64)
 #define IsAfPA_ARM(x) (((x) & afPA_Mask) == afPA_ARM)
+#define IsAfPA_ARM64(x) (((x) & afPA_Mask) == afPA_ARM64)
 #define IsAfPA_NoPlatform(x) (((x) & afPA_FullMask) == afPA_NoPlatform)
 #define IsAfPA_Specified(x) ((x) & afPA_Specified)
 #define PAIndex(x) (((x) & afPA_Mask) >> afPA_Shift)
@@ -1077,7 +1085,7 @@ typedef enum CorNativeType
 
     NATIVE_TYPE_IINSPECTABLE = 0x2e,
     NATIVE_TYPE_HSTRING     = 0x2f,
-
+    NATIVE_TYPE_LPUTF8STR   = 0x30, // utf-8 string
     NATIVE_TYPE_MAX         = 0x50, // first invalid element type
 } CorNativeType;
 
@@ -1794,10 +1802,6 @@ typedef enum CorAttributeTargets
 #define FRIEND_ASSEMBLY_TYPE_W                  L"System.Runtime.CompilerServices.InternalsVisibleToAttribute"
 #define FRIEND_ASSEMBLY_TYPE                     "System.Runtime.CompilerServices.InternalsVisibleToAttribute"
 #define FRIEND_ASSEMBLY_SIG                     {IMAGE_CEE_CS_CALLCONV_DEFAULT_HASTHIS, 2, ELEMENT_TYPE_VOID, ELEMENT_TYPE_STRING, ELEMENT_TYPE_BOOLEAN}
-
-#define FRIEND_ACCESS_ALLOWED_ATTRIBUTE_TYPE_W  L"System.Runtime.CompilerServices.FriendAccessAllowedAttribute"
-#define FRIEND_ACCESS_ALLOWED_ATTRIBUTE_TYPE     "System.Runtime.CompilerServices.FriendAccessAllowedAttribute"
-#define FRIEND_ACCESS_ALLOWED_SIG               {IMAGE_CEE_CS_CALLCONV_DEFAULT_HASTHIS, 0, ELEMENT_TYPE_VOID}
 
 #define SUBJECT_ASSEMBLY_TYPE_W                 L"System.Runtime.CompilerServices.IgnoresAccessChecksToAttribute"
 #define SUBJECT_ASSEMBLY_TYPE                    "System.Runtime.CompilerServices.IgnoresAccessChecksToAttribute"

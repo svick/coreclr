@@ -17,6 +17,9 @@ if(CLR_CMAKE_PLATFORM_UNIX)
     set(ILDASM_RESOURCES
         ${TARGET_CPP_FILE}
     )
+else()
+    set(ILDASM_RESOURCES ../dasm.rc)
+    add_definitions(-DFX_VER_INTERNALNAME_STR=ildasm.exe)
 endif(CLR_CMAKE_PLATFORM_UNIX)
 
 set(ILDASM_SOURCES
@@ -24,17 +27,29 @@ set(ILDASM_SOURCES
     ../dasm.cpp
     ../dasm_formattype.cpp
     ../dasm_mi.cpp
-    ../dasm_pr.cpp
     ../dasm_sz.cpp
     ../dis.cpp
     ../dman.cpp
     ../dres.cpp
-    ../gui.cpp
     ../ildasmpch.cpp
     ../windasm.cpp
 )
 
-add_executable(ildasm
+set(ILDASM_HEADERS
+    ../ceeload.h
+    ../dasm_sz.h
+    ../dis.h
+    ../dynamicarray.h
+    ../ildasmpch.h
+    ../resource.h
+    ../util.hpp
+)
+
+if (WIN32)
+    list(APPEND ILDASM_SOURCES ${ILDASM_HEADERS})
+endif(WIN32)
+
+_add_executable(ildasm
     ${ILDASM_SOURCES}
     ${ILDASM_RESOURCES}
 )
@@ -64,15 +79,10 @@ else()
     target_link_libraries(ildasm
         ${ILDASM_LINK_LIBRARIES}
         coreclr
-        msvcrt
         ole32
         oleaut32
         shell32
     )
-
-    # We will generate PDB only for the debug configuration
-    install (FILES ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/ildasm.pdb DESTINATION PDB)
-
 endif(CLR_CMAKE_PLATFORM_UNIX)
 
-install (TARGETS ildasm DESTINATION .)
+install_clr(ildasm)

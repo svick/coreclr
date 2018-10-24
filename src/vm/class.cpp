@@ -5,30 +5,20 @@
 // File: CLASS.CPP
 //
 
-
-//
-
-//
-// ============================================================================
-
 #include "common.h"
 
 #include "dllimport.h"
 #include "dllimportcallback.h"
 #include "fieldmarshaler.h"
-#include "constrainedexecutionregion.h"
 #include "customattribute.h"
 #include "encee.h"
+#include "typestring.h"
 
 #ifdef FEATURE_COMINTEROP 
 #include "comcallablewrapper.h"
 #include "clrtocomcall.h"
 #include "runtimecallablewrapper.h"
 #endif // FEATURE_COMINTEROP
-
-#ifdef MDIL
-#include "security.h"
-#endif
 
 //#define DEBUG_LAYOUT
 #define SORT_BY_RID
@@ -188,15 +178,6 @@ void EEClass::Destruct(MethodTable * pOwningMT)
     // default appdomain and mscorlib.dll module during shutdown
     _ASSERTE(!pOwningMT->IsTransparentProxy());
 
-#if defined(FEATURE_REMOTING) && !defined(HAS_REMOTING_PRECODE)
-    // Destruct the method descs by walking the chunks.
-    MethodTable::IntroducedMethodIterator it(pOwningMT);
-    for (; it.IsValid(); it.Next())
-    {
-        MethodDesc * pMD = it.GetMethodDesc();
-        pMD->Destruct();
-    }
-#endif
   
 #ifdef FEATURE_COMINTEROP 
     if (GetSparseCOMInteropVTableMap() != NULL && !pOwningMT->IsZapped())
@@ -403,8 +384,7 @@ VOID EEClass::FixupFieldDescForEnC(MethodTable * pMT, EnCFieldDesc *pFD, mdField
                        NULL,
                        NULL,
                        &genericsInfo,
-                       &bmtEnumFields,
-                       NULL);
+                       &bmtEnumFields);
 
     EX_TRY
     {
@@ -419,7 +399,6 @@ VOID EEClass::FixupFieldDescForEnC(MethodTable * pMT, EnCFieldDesc *pFD, mdField
                                  &pByValueClassCache,
                                  &bmtMFDescs,
                                  &bmtFP,
-                                 NULL, // not needed as thread or context static are not allowed in EnC
                                  &totalDeclaredFieldSize);
     }
     EX_CATCH_THROWABLE(&pThrowable);
@@ -902,7 +881,15 @@ ClassLoader::LoadExactParentAndInterfacesTransitively(MethodTable *pMT)
             LOG((LF_CLASSLOADER, LL_INFO1000, "GENERICS: Replaced approximate parent %s with exact parent %s from token %x\n", pParentMT->GetDebugClassName(), pNewParentMT->GetDebugClassName(), crExtends));
 
             // SetParentMethodTable is not used here since we want to update the indirection cell in the NGen case
-            *EnsureWritablePages(pMT->GetParentMethodTablePtr()) = pNewParentMT;
+            if (pMT->IsParentMethodTableIndirectPointerMaybeNull())
+            {
+                *EnsureWritablePages(pMT->GetParentMethodTableValuePtr()) = pNewParentMT;
+            }
+            else
+            {
+                EnsureWritablePages(pMT->GetParentMethodTablePointerPtr());
+                pMT->GetParentMethodTablePointerPtr()->SetValueMaybeNull(pNewParentMT);
+            }
 
             pParentMT = pNewParentMT;
         }
@@ -921,8 +908,11 @@ ClassLoader::LoadExactParentAndInterfacesTransitively(MethodTable *pMT)
         DWORD nDicts = pParentMT->GetNumDicts();
         for (DWORD iDict = 0; iDict < nDicts; iDict++)
         {
-            if (pMT->GetPerInstInfo()[iDict] != pParentMT->GetPerInstInfo()[iDict])
-                *EnsureWritablePages(&pMT->GetPerInstInfo()[iDict]) = pParentMT->GetPerInstInfo()[iDict];
+            if (pMT->GetPerInstInfo()[iDict].GetValueMaybeNull() != pParentMT->GetPerInstInfo()[iDict].GetValueMaybeNull())
+            {
+                EnsureWritablePages(&pMT->GetPerInstInfo()[iDict]);
+                pMT->GetPerInstInfo()[iDict].SetValueMaybeNull(pParentMT->GetPerInstInfo()[iDict].GetValueMaybeNull());
+            }
         }
     }
 
@@ -999,9 +989,9 @@ CorElementType EEClass::ComputeInternalCorElementTypeForValueType(MethodTable * 
 
     if (pMT->GetNumInstanceFields() == 1 && (!pMT->HasLayout()
         || pMT->GetNumInstanceFieldBytes() == 4
-#ifdef _WIN64
+#ifdef _TARGET_64BIT_
         || pMT->GetNumInstanceFieldBytes() == 8
-#endif // _WIN64
+#endif // _TARGET_64BIT_
         )) // Don't do the optimization if we're getting specified anything but the trivial layout.
     {
         FieldDesc * pFD = pMT->GetApproxFieldDescListRaw();
@@ -1033,10 +1023,10 @@ CorElementType EEClass::ComputeInternalCorElementTypeForValueType(MethodTable * 
             case ELEMENT_TYPE_U:
             case ELEMENT_TYPE_I4:
             case ELEMENT_TYPE_U4:
-#ifdef _WIN64 
+#ifdef _TARGET_64BIT_
             case ELEMENT_TYPE_I8:
             case ELEMENT_TYPE_U8:
-#endif // _WIN64
+#endif // _TARGET_64BIT_
             
             {
                 return type;
@@ -1049,480 +1039,6 @@ CorElementType EEClass::ComputeInternalCorElementTypeForValueType(MethodTable * 
 
     return ELEMENT_TYPE_VALUETYPE;
 }
-
-#if defined(CHECK_APP_DOMAIN_LEAKS) || defined(_DEBUG)
-//*******************************************************************************
-void EEClass::GetPredefinedAgility(Module *pModule, mdTypeDef td,
-                                   BOOL *pfIsAgile, BOOL *pfCheckAgile)
-{
-
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        FORBID_FAULT;
-    }
-    CONTRACTL_END
-
-    //
-    // There are 4 settings possible:
-    // IsAgile  CheckAgile
-    // F        F               (default)   Use normal type logic to determine agility
-    // T        F               "Proxy"     Treated as agile even though may not be.
-    // F        T               "Maybe"     Not agile, but specific instances can be made agile.
-    // T        T               "Force"     All instances are forced agile, even though not typesafe.
-    //
-    // Also, note that object arrays of agile or maybe agile types are made maybe agile.
-    //
-
-    static const struct PredefinedAgility
-    {
-        const char  *name;
-        BOOL        isAgile;
-        BOOL        checkAgile;
-    }
-
-    // Matches based on name with the first records having higher precedence than subsequent ones
-    // so that when there is an ambiguity, the first one will be used:
-    // System.Globalization.CultureNotFoundException
-    // comes before
-    // System.Globalization.*
-    //
-    // although System.Globalization.CultureNotFoundException matches both records, the first
-    // is the one that will be used
-    agility[] =
-    {
-        // The Thread leak across context boundaries.
-        // We manage the leaks manually
-        { g_ThreadClassName,                    TRUE,   FALSE },
-
-        // The SharedStatics class is a container for process-wide data
-        { g_SharedStaticsClassName,             FALSE,  TRUE },
-
-        // The extra dot at the start is to accomodate the string comparison logic below 
-        // when there is no namespace for a type
-        {".StringMaker",                        FALSE, TRUE },
-
-        {g_StringBufferClassName,               FALSE, TRUE },
-
-        { "System.ActivationArguments",         FALSE,  TRUE },
-        { "System.AppDomainSetup" ,             FALSE,  TRUE },
-        { "System.AppDomainInitializerInfo",    FALSE,  TRUE },
-
-        // Make all containers maybe agile
-        { "System.Collections.*",               FALSE,  TRUE },
-        { "System.Collections.Generic.*",               FALSE,  TRUE },
-
-        // Make all globalization objects agile except for System.Globalization.CultureNotFoundException
-        // The exception inherits from ArgumentException so needs the same agility
-        // this must come before the more general declaration below so that it will match first
-        { "System.Globalization.CultureNotFoundException",             FALSE,  FALSE },
-        // We have CultureInfo objects on thread.  Because threads leak across
-        // app domains, we have to be prepared for CultureInfo to leak across.
-        // CultureInfo exposes all of the other globalization objects, so we
-        // just make the entire namespace app domain agile.
-        { "System.Globalization.*",             FALSE,  TRUE },
-
-        // Remoting structures for legally smuggling messages across app domains
-        { "System.Runtime.Remoting.Messaging.SmuggledMethodCallMessage", FALSE,  TRUE },
-        { "System.Runtime.Remoting.Messaging.SmuggledMethodReturnMessage", FALSE,  TRUE },
-        { "System.Runtime.Remoting.Messaging.SmuggledObjRef", FALSE, TRUE},
-        { "System.Runtime.Remoting.ObjRef", FALSE,  TRUE },
-        { "System.Runtime.Remoting.ChannelInfo", FALSE,  TRUE },
-        { "System.Runtime.Remoting.Channels.CrossAppDomainData", FALSE,  TRUE },
-
-        // Remoting cached data structures are all in mscorlib
-        { "System.Runtime.Remoting.Metadata.RemotingCachedData",       FALSE,  TRUE },
-        { "System.Runtime.Remoting.Metadata.RemotingFieldCachedData", FALSE,  TRUE },
-        { "System.Runtime.Remoting.Metadata.RemotingParameterCachedData", FALSE,  TRUE },
-        { "System.Runtime.Remoting.Metadata.RemotingMethodCachedData", FALSE,  TRUE },
-        { "System.Runtime.Remoting.Metadata.RemotingTypeCachedData", FALSE,  TRUE },
-        { "System.Runtime.Remoting.Metadata.SoapAttribute",      FALSE,  TRUE },
-        { "System.Runtime.Remoting.Metadata.SoapFieldAttribute", FALSE,  TRUE },
-        { "System.Runtime.Remoting.Metadata.SoapMethodAttribute",FALSE,  TRUE },
-        { "System.Runtime.Remoting.Metadata.SoapParameterAttribute", FALSE,  TRUE },
-        { "System.Runtime.Remoting.Metadata.SoapTypeAttribute",  FALSE,  TRUE },
-
-        // Reflection types
-        { g_ReflectionMemberInfoName,                            FALSE,  TRUE },
-        { g_TypeClassName,                                       FALSE,  TRUE },
-        { g_ReflectionClassName,                                 FALSE,  TRUE },
-        { g_ReflectionConstructorInfoName,                       FALSE,  TRUE },
-        { g_ReflectionConstructorName,                           FALSE,  TRUE },
-        { g_ReflectionEventInfoName,                             FALSE,  TRUE },
-        { g_ReflectionEventName,                                 FALSE,  TRUE },
-        { g_ReflectionFieldInfoName,                             FALSE,  TRUE },
-        { g_ReflectionFieldName,                                 FALSE,  TRUE },
-        { g_MethodBaseName,                                      FALSE,  TRUE },
-        { g_ReflectionMethodInfoName,                            FALSE,  TRUE },
-        { g_ReflectionMethodName,                                FALSE,  TRUE },
-        { g_ReflectionPropertyInfoName,                          FALSE,  TRUE },
-        { g_ReflectionPropInfoName,                              FALSE,  TRUE },
-        { g_ReflectionParamInfoName,                             FALSE,  TRUE },
-        { g_ReflectionParamName,                                 FALSE,  TRUE },
-
-        { "System.RuntimeType+RuntimeTypeCache",                 FALSE,  TRUE },
-        { "System.RuntimeType+RuntimeTypeCache+MemberInfoCache`1", FALSE,  TRUE },
-        { "System.RuntimeType+RuntimeTypeCache+MemberInfoCache`1+Filter", FALSE,  TRUE },
-        { "System.Reflection.CerHashtable`2",                    FALSE,  TRUE },
-        { "System.Reflection.CerHashtable`2+Table",              FALSE,  TRUE },
-        { "System.Reflection.RtFieldInfo",                       FALSE,  TRUE },
-        { "System.Reflection.MdFieldInfo",                       FALSE,  TRUE },
-        { "System.Signature",                                    FALSE,  TRUE },
-        { "System.Reflection.MetadataImport",                    FALSE,  TRUE },
-
-        // LogSwitches are agile even though we can't prove it
-        // <TODO>@todo: do they need really to be?</TODO>
-        { "System.Diagnostics.LogSwitch",       FALSE,  TRUE },
-
-        // There is a process global PermissionTokenFactory
-        { "System.Security.PermissionToken",    FALSE,  TRUE },
-        { g_PermissionTokenFactoryName,         FALSE,  TRUE },
-
-        // Mark all the exceptions we throw agile.  This makes
-        // most BVTs pass even though exceptions leak
-        //
-        // Note that making exception checked automatically
-        // makes a bunch of subclasses checked as well.
-        //
-        // Pre-allocated exceptions
-        { g_ExceptionClassName,                 FALSE,  TRUE },
-        { g_OutOfMemoryExceptionClassName,      FALSE,  TRUE },
-        { g_StackOverflowExceptionClassName,    FALSE,  TRUE },
-        { g_ExecutionEngineExceptionClassName,  FALSE,  TRUE },
-
-        // SecurityDocument contains pointers and other agile types
-        { "System.Security.SecurityDocument",    TRUE, TRUE },
-
-        // BinaryFormatter smuggles these across appdomains.
-        { "System.Runtime.Serialization.Formatters.Binary.BinaryObjectWithMap", TRUE, FALSE},
-        { "System.Runtime.Serialization.Formatters.Binary.BinaryObjectWithMapTyped", TRUE, FALSE},
-
-        { NULL }
-    };
-
-    if (pModule == SystemDomain::SystemModule())
-    {
-        while (TRUE)
-        {
-            LPCUTF8 pszName;
-            LPCUTF8 pszNamespace;
-            HRESULT     hr;
-            mdTypeDef   tdEnclosing;
-            
-            if (FAILED(pModule->GetMDImport()->GetNameOfTypeDef(td, &pszName, &pszNamespace)))
-            {
-                break;
-            }
-            
-            // We rely the match algorithm matching the first items in the list before subsequent ones
-            // so that when there is an ambiguity, the first one will be used:
-            // System.Globalization.CultureNotFoundException
-            // comes before
-            // System.Globalization.*
-            //
-            // although System.Globalization.CultureNotFoundException matches both records, the first
-            // is the one that will be used
-            const PredefinedAgility *p = agility;
-            while (p->name != NULL)
-            {
-                SIZE_T length = strlen(pszNamespace);
-                if (strncmp(pszNamespace, p->name, length) == 0
-                    && (strcmp(pszName, p->name + length + 1) == 0
-                        || strcmp("*", p->name + length + 1) == 0))
-                {
-                    *pfIsAgile = p->isAgile;
-                    *pfCheckAgile = p->checkAgile;
-                    return;
-                }
-
-                p++;
-            }
-
-            // Perhaps we have a nested type like 'bucket' that is supposed to be
-            // agile or checked agile by virtue of being enclosed in a type like
-            // hashtable, which is itself inside "System.Collections".
-            tdEnclosing = mdTypeDefNil;
-            hr = pModule->GetMDImport()->GetNestedClassProps(td, &tdEnclosing);
-            if (SUCCEEDED(hr))
-            {
-                BAD_FORMAT_NOTHROW_ASSERT(tdEnclosing != td && TypeFromToken(tdEnclosing) == mdtTypeDef);
-                td = tdEnclosing;
-            }
-            else
-                break;
-        }
-    }
-
-    *pfIsAgile = FALSE;
-    *pfCheckAgile = FALSE;
-}
-
-//*******************************************************************************
-void EEClass::SetAppDomainAgileAttribute(MethodTable * pMT)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_TRIGGERS;
-        INJECT_FAULT(COMPlusThrowOM());
-        //        PRECONDITION(!IsAppDomainAgilityDone());
-    }
-    CONTRACTL_END
-
-    EEClass * pClass = pMT->GetClass();
-
-    //
-    // The most general case for provably a agile class is
-    // (1) No instance fields of non-sealed or non-agile types
-    // (2) Class is in system domain (its type must be not unloadable
-    //      & loaded in all app domains)
-    // (3) The class can't have a finalizer
-    // (4) The class can't be a COMClass
-    //
-
-    _ASSERTE(!pClass->IsAppDomainAgilityDone());
-
-    BOOL    fCheckAgile     = FALSE;
-    BOOL    fAgile          = FALSE;
-    BOOL    fFieldsAgile    = TRUE;
-    WORD        nFields         = 0;
-
-    if (!pMT->GetModule()->IsSystem())
-    {
-        //
-        // No types outside of the system domain can even think about
-        // being agile
-        //
-
-        goto exit;
-    }
-
-    if (pMT->IsComObjectType())
-    {
-        //
-        // No COM type is agile, as there is domain specific stuff in the sync block
-        //
-
-        goto exit;
-    }
-
-    if (pMT->IsInterface())
-    {
-        //
-        // Don't mark interfaces agile
-        //
-
-        goto exit;
-    }
-
-    if (pMT->ContainsGenericVariables())
-    {
-        // Types containing formal type parameters aren't agile
-        goto exit;
-    }
-
-    //
-    // See if we need agile checking in the class
-    //
-
-    GetPredefinedAgility(pMT->GetModule(), pMT->GetCl(),
-                         &fAgile, &fCheckAgile);
-
-    if (pMT->HasFinalizer())
-    {
-        if (!fAgile && !fCheckAgile)
-        {
-            //
-            // If we're finalizable, we need domain affinity.  Otherwise, we may appear
-            // to a particular app domain not to call the finalizer (since it may run
-            // in a different domain.)
-            //
-            // Note: do not change this assumption. The eager finalizaton code for
-            // appdomain unloading assumes that no obects other than those in mscorlib
-            // can be agile and finalizable  
-            //
-            goto exit;
-        }
-        else
-        {
-
-            // Note that a finalizable object will be considered potentially agile if it has one of the two
-            // predefined agility bits set. This will cause an assert in the eager finalization code if you add
-            // a finalizer to such a class - we don't want to have them as we can't run them eagerly and running
-            // them after we've cleared the roots/handles means it can't do much safely. Right now thread is the
-            // only one we allow.  
-            _ASSERTE(g_pThreadClass == NULL || pMT->IsAgileAndFinalizable());
-        }
-    }
-
-    //
-    // Now see if the type is "naturally agile" - that is, it's type structure
-    // guarantees agility.
-    //
-
-    if (pMT->GetParentMethodTable() != NULL)
-    {
-        EEClass * pParentClass = pMT->GetParentMethodTable()->GetClass();
-
-        //
-        // Make sure our parent was computed.  This should only happen
-        // when we are prejitting - otherwise it is computed for each
-        // class as its loaded.
-        //
-
-        _ASSERTE(pParentClass->IsAppDomainAgilityDone());
-
-        if (!pParentClass->IsAppDomainAgile())
-        {
-            fFieldsAgile = FALSE;
-            if (fCheckAgile)
-                _ASSERTE(pParentClass->IsCheckAppDomainAgile());
-        }
-
-        //
-        // To save having to list a lot of trivial (layout-wise) subclasses,
-        // automatically check a subclass if its parent is checked and
-        // it introduces no new fields.
-        //
-
-        if (!fCheckAgile
-            && pParentClass->IsCheckAppDomainAgile()
-            && pClass->GetNumInstanceFields() == pParentClass->GetNumInstanceFields())
-            fCheckAgile = TRUE;
-    }
-
-    nFields = pMT->GetNumInstanceFields()
-        - (pMT->GetParentMethodTable() == NULL ? 0 : pMT->GetParentMethodTable()->GetNumInstanceFields());
-
-    if (fFieldsAgile || fCheckAgile)
-    {
-        FieldDesc *pFD = pClass->GetFieldDescList();
-        FieldDesc *pFDEnd = pFD + nFields;
-        while (pFD < pFDEnd)
-        {
-            switch (pFD->GetFieldType())
-            {
-            case ELEMENT_TYPE_CLASS:
-                {
-                    //
-                    // There is a bit of a problem in computing the classes which are naturally agile -
-                    // we don't want to load types of non-value type fields.  So for now we'll
-                    // err on the side of conservatism and not allow any non-value type fields other than
-                    // the forced agile types listed above.
-                    //
-
-                    MetaSig sig(pFD);
-                    CorElementType type = sig.NextArg();
-                    SigPointer sigPtr = sig.GetArgProps();
-
-                    //
-                    // Don't worry about strings
-                    //
-
-                    if (type == ELEMENT_TYPE_STRING)
-                        break;
-
-                    // Find our field's token so we can proceed cautiously
-                    mdToken token = mdTokenNil;
-
-                    if (type == ELEMENT_TYPE_CLASS)
-                        IfFailThrow(sigPtr.GetToken(&token));
-
-                    //
-                    // First, a special check to see if the field is of our own type.
-                    //
-
-                    if (token == pMT->GetCl() && pMT->IsSealed())
-                        break;
-
-                    //
-                    // Now, look for the field's TypeHandle.
-                    //
-                    // <TODO>@todo: there is some ifdef'd code here to to load the type if it's
-                    // not already loading.  This code has synchronization problems, as well
-                    // as triggering more aggressive loading than normal.  So it's disabled
-                    // for now.
-                    // </TODO>
-
-                    TypeHandle th;
-#if 0 
-                    if (TypeFromToken(token) == mdTypeDef
-                        && GetClassLoader()->FindUnresolvedClass(GetModule, token) == NULL)
-                        th = pFD->GetFieldTypeHandleThrowing();
-                    else
-#endif // 0
-                        th = pFD->LookupFieldTypeHandle();
-
-                    //
-                    // See if the referenced type is agile.  Note that there is a reasonable
-                    // chance that the type hasn't been loaded yet.  If this is the case,
-                    // we just have to assume that it's not agile, since we can't trigger
-                    // extra loads here (for fear of circular recursion.)
-                    //
-                    // If you have an agile class which runs into this problem, you can solve it by
-                    // setting the type manually to be agile.
-                    //
-
-                    if (th.IsNull()
-                        || !th.IsAppDomainAgile()
-                        || (!th.IsTypeDesc()
-                            && !th.AsMethodTable()->IsSealed()))
-                    {
-                        //
-                        // Treat the field as non-agile.
-                        //
-
-                        fFieldsAgile = FALSE;
-                        if (fCheckAgile)
-                            pFD->SetDangerousAppDomainAgileField();
-                    }
-                }
-
-                break;
-
-            case ELEMENT_TYPE_VALUETYPE:
-                {
-                    TypeHandle th;
-
-                    {
-                        // Loading a non-self-ref valuetype field.
-                        OVERRIDE_TYPE_LOAD_LEVEL_LIMIT(CLASS_LOADED);
-
-                        th = pFD->GetApproxFieldTypeHandleThrowing();
-                    }
-
-                    _ASSERTE(!th.IsNull());
-
-                    if (!th.IsAppDomainAgile())
-                    {
-                        fFieldsAgile = FALSE;
-                        if (fCheckAgile)
-                            pFD->SetDangerousAppDomainAgileField();
-                    }
-                }
-
-                break;
-
-            default:
-                break;
-            }
-
-            pFD++;
-        }
-    }
-
-    if (fFieldsAgile || fAgile)
-        pClass->SetAppDomainAgile();
-
-    if (fCheckAgile && !fFieldsAgile)
-        pClass->SetCheckAppDomainAgile();
-
-exit:
-    LOG((LF_CLASSLOADER, LL_INFO1000, "CLASSLOADER: AppDomainAgileAttribute for %s is %d\n", pClass->GetDebugClassName(), pClass->IsAppDomainAgile()));
-    pClass->SetAppDomainAgilityDone();
-}
-#endif // defined(CHECK_APP_DOMAIN_LEAKS) || defined(_DEBUG)
 
 //*******************************************************************************
 //
@@ -1639,9 +1155,28 @@ MethodDesc* MethodTable::GetExistingUnboxedEntryPointMD(MethodDesc *pMD)
                                                        );
 }
 
-#endif // !DACCESS_COMPILE
+#endif // !DACCESS_COMPILE 
 
-#ifdef FEATURE_HFA
+//*******************************************************************************
+#if !defined(FEATURE_HFA)
+bool MethodTable::IsHFA()
+{
+    LIMITED_METHOD_CONTRACT;
+#ifdef DACCESS_COMPILE
+    return false;
+#else
+    if (GetClass()->GetMethodTable()->IsValueType())
+    {
+        return GetClass()->CheckForHFA();
+    }
+    else
+    {
+        return false;
+    }
+#endif
+}
+#endif // !FEATURE_HFA
+
 //*******************************************************************************
 CorElementType MethodTable::GetHFAType()
 {
@@ -1695,6 +1230,228 @@ CorElementType MethodTable::GetNativeHFAType()
 {
     LIMITED_METHOD_CONTRACT;
     return HasLayout() ? GetLayoutInfo()->GetNativeHFAType() : GetHFAType();
+}
+
+//---------------------------------------------------------------------------------------
+//
+// When FEATURE_HFA is defined, we cache the value; otherwise we recompute it with each
+// call. The latter is only for the armaltjit and the arm64altjit.
+bool
+#if defined(FEATURE_HFA)
+EEClass::CheckForHFA(MethodTable ** pByValueClassCache)
+#else
+EEClass::CheckForHFA()
+#endif
+{
+    STANDARD_VM_CONTRACT;
+
+    // This method should be called for valuetypes only
+    _ASSERTE(GetMethodTable()->IsValueType());
+
+    // No HFAs with explicit layout. There may be cases where explicit layout may be still
+    // eligible for HFA, but it is hard to tell the real intent. Make it simple and just 
+    // unconditionally disable HFAs for explicit layout.
+    if (HasExplicitFieldOffsetLayout())
+        return false;
+
+    // The SIMD Intrinsic types are meant to be handled specially and should not be treated as HFA
+    if (GetMethodTable()->IsIntrinsicType())
+    {
+        LPCUTF8 namespaceName;
+        LPCUTF8 className = GetMethodTable()->GetFullyQualifiedNameInfo(&namespaceName);
+
+        if ((strcmp(className, "Vector256`1") == 0) || (strcmp(className, "Vector128`1") == 0) ||
+            (strcmp(className, "Vector64`1") == 0))
+        {
+            assert(strcmp(namespaceName, "System.Runtime.Intrinsics") == 0);
+            return false;
+        }
+    }
+
+    CorElementType hfaType = ELEMENT_TYPE_END;
+
+    FieldDesc *pFieldDescList = GetFieldDescList();
+    for (UINT i = 0; i < GetNumInstanceFields(); i++)
+    {
+        FieldDesc *pFD = &pFieldDescList[i];
+        CorElementType fieldType = pFD->GetFieldType();
+
+        switch (fieldType)
+        {
+        case ELEMENT_TYPE_VALUETYPE:
+#if defined(FEATURE_HFA)
+            fieldType = pByValueClassCache[i]->GetHFAType();
+#else
+            fieldType = pFD->LookupApproxFieldTypeHandle().AsMethodTable()->GetHFAType();
+#endif
+            break;
+
+        case ELEMENT_TYPE_R4:
+        case ELEMENT_TYPE_R8:
+            break;
+
+        default:
+            // Not HFA
+            return false;
+        }
+
+        // Field type should be a valid HFA type.
+        if (fieldType == ELEMENT_TYPE_END)
+        {
+            return false;
+        }
+
+        // Initialize with a valid HFA type.
+        if (hfaType == ELEMENT_TYPE_END)
+        {
+            hfaType = fieldType;
+        }
+        // All field types should be equal.
+        else if (fieldType != hfaType)
+        {
+            return false;
+        }
+    }
+
+    if (hfaType == ELEMENT_TYPE_END)
+        return false;
+
+    int elemSize = (hfaType == ELEMENT_TYPE_R8) ? sizeof(double) : sizeof(float);
+
+    // Note that we check the total size, but do not perform any checks on number of fields:
+    // - Type of fields can be HFA valuetype itself
+    // - Managed C++ HFA valuetypes have just one <alignment member> of type float to signal that 
+    //   the valuetype is HFA and explicitly specified size
+
+    DWORD totalSize = GetMethodTable()->GetNumInstanceFieldBytes();
+
+    if (totalSize % elemSize != 0)
+        return false;
+
+    // On ARM, HFAs can have a maximum of four fields regardless of whether those are float or double.
+    if (totalSize / elemSize > 4)
+        return false;
+
+    // All the above tests passed. It's HFA!
+#if defined(FEATURE_HFA)
+    GetMethodTable()->SetIsHFA();
+#endif
+    return true;
+}
+
+CorElementType EEClassLayoutInfo::GetNativeHFATypeRaw()
+{
+    UINT  numReferenceFields = GetNumCTMFields();
+
+    CorElementType hfaType = ELEMENT_TYPE_END;
+
+#ifndef DACCESS_COMPILE
+    const FieldMarshaler *pFieldMarshaler = GetFieldMarshalers();
+    while (numReferenceFields--)
+    {
+        CorElementType fieldType = ELEMENT_TYPE_END;
+
+        switch (pFieldMarshaler->GetNStructFieldType())
+        {
+        case NFT_COPY4:
+        case NFT_COPY8:
+            fieldType = pFieldMarshaler->GetFieldDesc()->GetFieldType();
+            if (fieldType != ELEMENT_TYPE_R4 && fieldType != ELEMENT_TYPE_R8)
+                return ELEMENT_TYPE_END;
+            break;
+
+        case NFT_NESTEDLAYOUTCLASS:
+            fieldType = ((FieldMarshaler_NestedLayoutClass *)pFieldMarshaler)->GetMethodTable()->GetNativeHFAType();
+            break;
+
+        case NFT_NESTEDVALUECLASS:
+            fieldType = ((FieldMarshaler_NestedValueClass *)pFieldMarshaler)->GetMethodTable()->GetNativeHFAType();
+            break;
+
+        case NFT_FIXEDARRAY:
+            fieldType = ((FieldMarshaler_FixedArray *)pFieldMarshaler)->GetElementTypeHandle().GetMethodTable()->GetNativeHFAType();
+            break;
+
+        case NFT_DATE:
+            fieldType = ELEMENT_TYPE_R8;
+            break;
+
+        default:
+            // Not HFA
+            return ELEMENT_TYPE_END;
+        }
+
+        // Field type should be a valid HFA type.
+        if (fieldType == ELEMENT_TYPE_END)
+        {
+            return ELEMENT_TYPE_END;
+        }
+
+        // Initialize with a valid HFA type.
+        if (hfaType == ELEMENT_TYPE_END)
+        {
+            hfaType = fieldType;
+        }
+        // All field types should be equal.
+        else if (fieldType != hfaType)
+        {
+            return ELEMENT_TYPE_END;
+        }
+
+        ((BYTE*&)pFieldMarshaler) += MAXFIELDMARSHALERSIZE;
+    }
+
+    if (hfaType == ELEMENT_TYPE_END)
+        return ELEMENT_TYPE_END;
+
+    int elemSize = (hfaType == ELEMENT_TYPE_R8) ? sizeof(double) : sizeof(float);
+
+    // Note that we check the total size, but do not perform any checks on number of fields:
+    // - Type of fields can be HFA valuetype itself
+    // - Managed C++ HFA valuetypes have just one <alignment member> of type float to signal that 
+    //   the valuetype is HFA and explicitly specified size
+
+    DWORD totalSize = GetNativeSize();
+
+    if (totalSize % elemSize != 0)
+        return ELEMENT_TYPE_END;
+
+    // On ARM, HFAs can have a maximum of four fields regardless of whether those are float or double.
+    if (totalSize / elemSize > 4)
+        return ELEMENT_TYPE_END;
+
+#endif // !DACCESS_COMPILE
+
+    return hfaType;
+}
+
+#ifdef FEATURE_HFA
+//
+// The managed and unmanaged views of the types can differ for non-blitable types. This method
+// mirrors the HFA type computation for the unmanaged view.
+//
+VOID EEClass::CheckForNativeHFA()
+{
+    STANDARD_VM_CONTRACT;
+
+    // No HFAs with inheritance
+    if (!(GetMethodTable()->IsValueType() || (GetMethodTable()->GetParentMethodTable() == g_pObjectClass)))
+        return;
+
+    // No HFAs with explicit layout. There may be cases where explicit layout may be still
+    // eligible for HFA, but it is hard to tell the real intent. Make it simple and just 
+    // unconditionally disable HFAs for explicit layout.
+    if (HasExplicitFieldOffsetLayout())
+        return;
+
+    CorElementType hfaType = GetLayoutInfo()->GetNativeHFATypeRaw();
+    if (hfaType == ELEMENT_TYPE_END)
+    {
+        return;
+    }
+
+    // All the above tests passed. It's HFA!
+    GetLayoutInfo()->SetNativeHFAType(hfaType);
 }
 #endif // FEATURE_HFA
 
@@ -2386,7 +2143,7 @@ MethodTable::DebugDumpGCDesc(
                 {
                     ssBuff.Printf(W("   offset %5d (%d w/o Object), size %5d (%5d w/o BaseSize subtr)\n"),
                         pSeries->GetSeriesOffset(),
-                        pSeries->GetSeriesOffset() - sizeof(Object),
+                        pSeries->GetSeriesOffset() - OBJECT_SIZE,
                         pSeries->GetSeriesSize(),
                         pSeries->GetSeriesSize() + GetBaseSize() );
                     WszOutputDebugString(ssBuff.GetUnicode());
@@ -2396,7 +2153,7 @@ MethodTable::DebugDumpGCDesc(
                     //LF_ALWAYS allowed here because this is controlled by special env var ShouldDumpOnClassLoad
                     LOG((LF_ALWAYS, LL_ALWAYS, "   offset %5d (%d w/o Object), size %5d (%5d w/o BaseSize subtr)\n",
                          pSeries->GetSeriesOffset(),
-                         pSeries->GetSeriesOffset() - sizeof(Object),
+                         pSeries->GetSeriesOffset() - OBJECT_SIZE,
                          pSeries->GetSeriesSize(),
                          pSeries->GetSeriesSize() + GetBaseSize()
                          ));
@@ -2494,12 +2251,6 @@ MethodTable::GetSubstitutionForParent(
 
 #endif //!DACCESS_COMPILE
 
-//*******************************************************************************
-DWORD EEClass::GetReliabilityContract()
-{
-    LIMITED_METHOD_CONTRACT;
-    return HasOptionalFields() ? GetOptionalFields()->m_dwReliabilityContract : RC_NULL;
-}
 
 //*******************************************************************************
 #ifdef FEATURE_PREJIT
@@ -2716,21 +2467,7 @@ void EEClass::Save(DataImage *image, MethodTable *pMT)
 
     LOG((LF_ZAP, LL_INFO10000, "EEClass::Save %s (%p)\n", m_szDebugClassName, this));
 
-    // Optimize packable fields before saving into ngen image (the packable fields are located at the end of
-    // the EEClass or sub-type instance and packing will transform them into a space-efficient format which
-    // should reduce the result returned by the GetSize() call below). Packing will fail if the compression
-    // algorithm would result in an increase in size. We track this in the m_fFieldsArePacked data member
-    // which we use to determine whether to access the fields in their packed or unpacked format.
-    // Special case: we don't attempt to pack fields for the System.Threading.OverlappedData class since a
-    // host can change the size of this at runtime. This requires modifying one of the packable fields and we
-    // don't support updates to such fields if they were successfully packed.
-    if (g_pOverlappedDataClass == NULL)
-    {
-        g_pOverlappedDataClass = MscorlibBinder::GetClass(CLASS__OVERLAPPEDDATA);
-        _ASSERTE(g_pOverlappedDataClass);
-    }
-    if (this != g_pOverlappedDataClass->GetClass())
-        m_fFieldsArePacked = GetPackedFields()->PackFields();
+    m_fFieldsArePacked = GetPackedFields()->PackFields();
 
     DWORD cbSize = GetSize();
 
@@ -2837,13 +2574,13 @@ void EEClass::Save(DataImage *image, MethodTable *pMT)
 
         if (pInfo->m_numCTMFields > 0)
         {
-            ZapStoredStructure * pNode = image->StoreStructure(pInfo->m_pFieldMarshalers,
+            ZapStoredStructure * pNode = image->StoreStructure(pInfo->GetFieldMarshalers(),
                                             pInfo->m_numCTMFields * MAXFIELDMARSHALERSIZE,
                                             DataImage::ITEM_FIELD_MARSHALERS);
 
             for (UINT iField = 0; iField < pInfo->m_numCTMFields; iField++)
             {
-                FieldMarshaler *pFM = (FieldMarshaler*)((BYTE *)pInfo->m_pFieldMarshalers + iField * MAXFIELDMARSHALERSIZE);
+                FieldMarshaler *pFM = (FieldMarshaler*)((BYTE *)pInfo->GetFieldMarshalers() + iField * MAXFIELDMARSHALERSIZE);
                 pFM->Save(image);
 
                 if (iField > 0)
@@ -2903,7 +2640,7 @@ void EEClass::Save(DataImage *image, MethodTable *pMT)
             {
                 // make sure we don't store a GUID_NULL guid in the NGEN image
                 // instead we'll compute the GUID at runtime, and throw, if appropriate
-                m_pGuidInfo = NULL;
+                m_pGuidInfo.SetValueMaybeNull(NULL);
             }
         }
     }
@@ -2980,14 +2717,14 @@ void EEClass::Fixup(DataImage *image, MethodTable *pMT)
     }
 
     if (HasOptionalFields())
-        image->FixupPointerField(GetOptionalFields(), offsetof(EEClassOptionalFields, m_pVarianceInfo));
+        image->FixupRelativePointerField(GetOptionalFields(), offsetof(EEClassOptionalFields, m_pVarianceInfo));
 
     //
     // We pass in the method table, because some classes (e.g. remoting proxy)
     // have fake method tables set up in them & we want to restore the regular
     // one.
     //
-    image->FixupField(this, offsetof(EEClass, m_pMethodTable), pMT);
+    image->FixupField(this, offsetof(EEClass, m_pMethodTable), pMT, 0, IMAGE_REL_BASED_RelativePointer);
 
     //
     // Fixup MethodDescChunk and MethodDescs
@@ -3048,11 +2785,11 @@ void EEClass::Fixup(DataImage *image, MethodTable *pMT)
 
     if (HasLayout())
     {
-        image->FixupPointerField(this, offsetof(LayoutEEClass, m_LayoutInfo.m_pFieldMarshalers));
+        image->FixupRelativePointerField(this, offsetof(LayoutEEClass, m_LayoutInfo.m_pFieldMarshalers));
 
         EEClassLayoutInfo *pInfo = &((LayoutEEClass*)this)->m_LayoutInfo;
 
-        FieldMarshaler *pFM = pInfo->m_pFieldMarshalers;
+        FieldMarshaler *pFM = pInfo->GetFieldMarshalers();
         FieldMarshaler *pFMEnd = (FieldMarshaler*) ((BYTE *)pFM + pInfo->m_numCTMFields*MAXFIELDMARSHALERSIZE);
         while (pFM < pFMEnd)
         {
@@ -3062,13 +2799,14 @@ void EEClass::Fixup(DataImage *image, MethodTable *pMT)
     }
     else if (IsDelegate())
     {
-        image->FixupPointerField(this, offsetof(DelegateEEClass, m_pInvokeMethod));
-        image->FixupPointerField(this, offsetof(DelegateEEClass, m_pBeginInvokeMethod));
-        image->FixupPointerField(this, offsetof(DelegateEEClass, m_pEndInvokeMethod));
+        image->FixupRelativePointerField(this, offsetof(DelegateEEClass, m_pInvokeMethod));
+        image->FixupRelativePointerField(this, offsetof(DelegateEEClass, m_pBeginInvokeMethod));
+        image->FixupRelativePointerField(this, offsetof(DelegateEEClass, m_pEndInvokeMethod));
 
         image->ZeroPointerField(this, offsetof(DelegateEEClass, m_pUMThunkMarshInfo));
         image->ZeroPointerField(this, offsetof(DelegateEEClass, m_pStaticCallStub));
         image->ZeroPointerField(this, offsetof(DelegateEEClass, m_pMultiCastInvokeStub));
+        image->ZeroPointerField(this, offsetof(DelegateEEClass, m_pSecureDelegateInvokeStub));
         image->ZeroPointerField(this, offsetof(DelegateEEClass, m_pMarshalStub));
 
 #ifdef FEATURE_COMINTEROP
@@ -3096,7 +2834,7 @@ void EEClass::Fixup(DataImage *image, MethodTable *pMT)
     //
 
     if (IsInterface() && GetGuidInfo() != NULL)
-        image->FixupPointerField(this, offsetof(EEClass, m_pGuidInfo));
+        image->FixupRelativePointerField(this, offsetof(EEClass, m_pGuidInfo));
     else
         image->ZeroPointerField(this, offsetof(EEClass, m_pGuidInfo));
 
@@ -3466,1280 +3204,3 @@ void EEClass::SetPackableField(EEClassFieldId eField, DWORD dwValue)
     _ASSERTE(!m_fFieldsArePacked);
     GetPackedFields()->SetUnpackedField(eField, dwValue);
 }
-
-#ifndef DACCESS_COMPILE 
-#ifdef MDIL
-//-------------------------------------------------------------------------------
-void EEClass::WriteCompactLayout(ICompactLayoutWriter *pICLW, ZapImage *pZapImage)
-{
-    STANDARD_VM_CONTRACT;
-
-    EX_TRY
-    {
-        IfFailThrow(WriteCompactLayoutHelper(pICLW));
-    }
-    EX_CATCH
-    {
-        // This catch will prevent type load/assembly load failures that occur during CTL generation to 
-        // not bring down the MDIL generation phase.
-        SString message;
-        GET_EXCEPTION()->GetMessage(message);
-        GetSvcLogger()->Printf(LogLevel_Warning, W("%s while generating CTL for typedef 0x%x\n"), message.GetUnicode(), GetMethodTable()->GetCl());
-    }
-    EX_END_CATCH(RethrowCorruptingExceptions)
-}
-
-//-------------------------------------------------------------------------------
-HRESULT EEClass::WriteCompactLayoutHelper(ICompactLayoutWriter *pICLW)
-{
-    STANDARD_VM_CONTRACT;
-
-    HRESULT hr = S_OK;
-    MethodTable * pMT = GetMethodTable();
-    Module *pModule = pMT->GetModule();
-    IMDInternalImport *pMDImport = pModule->GetMDImport();
-
-    // Prepare the CTL writer for writing a type
-    pICLW->Reset();
-
-    //
-    // Gather high level information about the type: flags, and tokens for
-    // the type, it's base, and it's enclosing type (if any).
-    //
-
-    DWORD flags = 0;
-    mdToken tkType = pMT->GetCl();
-    mdToken tkBaseType = mdTokenNil;
-    pMDImport->GetTypeDefProps(tkType, &flags, &tkBaseType);
-
-    mdTypeDef tkEnclosingType = mdTokenNil;
-    pMDImport->GetNestedClassProps(tkType, &tkEnclosingType);
-
-    //
-    // Get the count for the number of interfaces from metadata
-    //
-
-    HENUMInternalHolder hEnumInterfaceImpl(pMDImport);
-    hEnumInterfaceImpl.EnumInit(mdtInterfaceImpl, tkType);
-    DWORD interfaceCount = hEnumInterfaceImpl.EnumGetCount();
-
-    //
-    // Get the count of fields introduced by this type.
-    //
-
-    DWORD fieldCount = pMT->GetNumIntroducedInstanceFields() + GetNumStaticFields();
-
-    //
-    // Count the total number of declared methods for this class
-    //
-
-    DWORD declaredMethodCount = 0;
-    DWORD unboxingStubCount = 0;
-    DWORD declaredVirtualMethodCount = 0;
-    {   // If this in any way proves to be a speed issue it could
-        // be done more efficiently by just iterating the MethodDescChunks
-        // and just adding the counts of each chunk together. For now this
-        // is the preferred abstraction to use.
-        MethodTable::IntroducedMethodIterator it(GetMethodTable());
-        for (; it.IsValid(); it.Next())
-        {
-            MethodDesc *pMD = it.GetMethodDesc();
-
-            // unboxing stubs need to be handled specially
-            // we don't want to report them  - the fact that they are
-            // in the method table and have method descs is a CLR
-            // implementation detail.
-            // however, we need to know their number so we can correct
-            // internal counts that include them
-            if (pMD->IsUnboxingStub())
-                ++unboxingStubCount;
-            else
-            {
-                if (pMD->IsVirtual())
-                    declaredVirtualMethodCount++;
-                ++declaredMethodCount;
-            }
-        }
-    }
-
-    //
-    // Calculate how many virtual methods contribute to overrides and how
-    // many contribute to new slots
-    //
-
-    DWORD nonVirtualMethodCount = pMT->GetNumMethods() - unboxingStubCount - pMT->GetNumVirtuals();
-    DWORD newVirtualMethodCount = pMT->GetNumVirtuals() - pMT->GetNumParentVirtuals();
-    if (newVirtualMethodCount > declaredVirtualMethodCount)
-    {
-        // this should only happen for transparent proxy, which has special rules
-        _ASSERTE(pMT->IsTransparentProxy());
-        newVirtualMethodCount = declaredVirtualMethodCount;
-    }
-    DWORD overrideVirtualMethodCount = declaredMethodCount - nonVirtualMethodCount - newVirtualMethodCount;
-    if (overrideVirtualMethodCount > declaredVirtualMethodCount)
-    {
-        // this should only happen for transparent proxy, which has special rules
-        _ASSERTE(pMT->IsTransparentProxy());
-        overrideVirtualMethodCount = declaredVirtualMethodCount;
-    }
-
-    //
-    // Generic types are prefixed by their number of type arguments
-    if (pMT->HasInstantiation())
-    {
-        pICLW->GenericType(pMT->GetNumGenericArgs());
-        Instantiation inst = GetMethodTable()->GetInstantiation();
-        BYTE *varianceInfo = GetVarianceInfo();
-        for (DWORD i = 0; i < inst.GetNumArgs(); i++)
-        {
-            CorGenericParamAttr flags = GetVarianceOfTypeParameter(varianceInfo, i);
-            pICLW->GenericParameter(inst[i].AsGenericVariable()->GetToken(), flags);
-        }
-    }
-
-    _ASSERTE((pMT == GetMethodTable()));
-    if (GetMethodTable()->IsComObjectType())
-    {
-//        printf("Com object type: %08x\n", tkType);
-        flags |= ICompactLayoutWriter::CF_COMOBJECTTYPE;
-    }
-
-    if (IsEquivalentType())
-    {
-        flags |= ICompactLayoutWriter::CF_TYPE_EQUIVALENT;
-    }
-
-#ifdef FEATURE_COMINTEROP
-    if (IsComClassInterface())
-    {
-//        printf("Com class interface type: %08x\n", tkType);
-        flags |= ICompactLayoutWriter::CF_COMCLASSINTERFACE;
-    }
-
-    if (IsComEventItfType())
-    {
-//        printf("Com event interface type: %08x\n", tkType);
-        flags |= ICompactLayoutWriter::CF_COMEVENTINTERFACE;
-    }
-#endif // FEATURE_COMINTEROP
-
-    if (GetMethodTable()->HasFixedAddressVTStatics())
-    {
-        flags |= ICompactLayoutWriter::CF_FIXED_ADDRESS_VT_STATICS;
-    }
-
-#ifdef FEATURE_COMINTEROP
-    if (IsInterface())
-    {
-        switch (GetMethodTable()->GetComInterfaceType())
-        {
-        case    ifDual:     flags |= ICompactLayoutWriter::CF_DUAL;     break;
-        case    ifVtable:   flags |= ICompactLayoutWriter::CF_VTABLE;   break;
-        case    ifDispatch: flags |= ICompactLayoutWriter::CF_DISPATCH; break;
-        case    ifInspectable: flags |= ICompactLayoutWriter::CF_INSPECTABLE; break;
-        default: (!"assert unexpected com interface type");             break;
-        }
-    }
-#endif // FEATURE_COMINTEROP
-
-    if (GetMethodTable()->DependsOnEquivalentOrForwardedStructs())
-    {
-        flags |= ICompactLayoutWriter::CF_DEPENDS_ON_COM_IMPORT_STRUCTS;
-    }
-
-    if (GetMethodTable()->HasFinalizer())
-    {
-        _ASSERTE(!IsInterface());
-        flags |= ICompactLayoutWriter::CF_FINALIZER;
-        if (GetMethodTable()->HasCriticalFinalizer())
-            flags |= ICompactLayoutWriter::CF_CRITICALFINALIZER;
-    }
-
-
-    // Force computation of transparency bits into EEClass->m_VMFlags
-    Security::IsTypeTransparent(GetMethodTable());
-
-    if ((m_VMFlags & VMFLAG_TRANSPARENCY_MASK) == VMFLAG_TRANSPARENCY_UNKNOWN)
-        printf("Transparency unknown of type: %08x unknown?????\n", tkType);
-
-
-    if (m_VMFlags & VMFLAG_CONTAINS_STACK_PTR)
-        flags |= ICompactLayoutWriter::CF_CONTAINS_STACK_PTR;
-
-    // If the class is marked as unsafe value class we need to filter out those classes
-    // that get marked only "by inheritance" (they contain a field of a type that is marked).
-    // In CTL we will mark only the classes that are marked expicitly via a custom attribute.
-    // The binder will propagate this state again during field layout - thereby avoiding
-    // potentially stale bits.
-
-    // Check that this bit is not already used by somebody else
-    _ASSERTE((flags & ICompactLayoutWriter::CF_UNSAFEVALUETYPE) == 0);
-
-    if (IsUnsafeValueClass())
-    {
-        // If the class is marked as unsafe value class we need to filter out those classes
-        // that get the mark only "by inheritance". In CTL we will mark only the classes
-        // that are marked expicitly in meta-data.
-
-        //printf("%s ", IsMdPublic(flags) ? "Public" : "Intern");
-        //printf("Type 0x%08X is unsafe valuetype", tkType);
-
-        HRESULT hr = pMT->GetMDImport()->GetCustomAttributeByName(tkType,
-                                                             g_CompilerServicesUnsafeValueTypeAttribute,
-                                                             NULL, NULL);
-        IfFailThrow(hr);
-        if (hr == S_OK)
-        {
-            //printf(" (directly marked)", tkType);
-            flags |= ICompactLayoutWriter::CF_UNSAFEVALUETYPE;
-        }
-        //printf("\n");
-    }
-
-    //
-    // Now have enough information to start serializing the type.
-    //
-
-    pICLW->StartType(flags,                          // CorTypeAttr plus perhaps other flags
-                     tkType,                         // typedef token for this type
-                     tkBaseType,                     // type this type is derived from, if any
-                     tkEnclosingType,                // type this type is nested in, if any
-                     interfaceCount,                 // how many times ImplementInterface() will be called
-                     fieldCount,                     // how many times Field() will be called
-                     declaredMethodCount,            // how many times Method() will be called
-                     newVirtualMethodCount,          // how many new virtuals this type defines
-                     overrideVirtualMethodCount );
-
-    DWORD dwPackSize;
-    hr = pMDImport->GetClassPackSize(GetMethodTable()->GetCl(), &dwPackSize);
-    if (!FAILED(hr) && dwPackSize != 0)
-    {
-        _ASSERTE(dwPackSize == 1 || dwPackSize == 2 || dwPackSize == 4 || dwPackSize == 8 || dwPackSize == 16 || dwPackSize == 32 || dwPackSize == 64 || dwPackSize == 128);
-        pICLW->PackType(dwPackSize);
-    }
-
-    IfFailRet(WriteCompactLayoutTypeFlags(pICLW));
-    IfFailRet(WriteCompactLayoutSpecialType(pICLW));
-
-    if (IsInterface() && !HasNoGuid())
-    {
-        GUID guid;
-        GetMethodTable()->GetGuid(&guid, TRUE);
-        GuidInfo *guidInfo = GetGuidInfo();
-        if (guidInfo != NULL)
-            pICLW->GuidInformation(guidInfo);
-    }
-
-    IfFailRet(WriteCompactLayoutFields(pICLW));
-
-    IfFailRet(WriteCompactLayoutMethods(pICLW));
-    IfFailRet(WriteCompactLayoutMethodImpls(pICLW));
-
-    IfFailRet(WriteCompactLayoutInterfaces(pICLW));
-    IfFailRet(WriteCompactLayoutInterfaceImpls(pICLW));
-
-
-    pICLW->EndType();
-
-    return hr;
-}
-
-//-------------------------------------------------------------------------------
-HRESULT EEClass::WriteCompactLayoutTypeFlags(ICompactLayoutWriter *pICLW)
-{
-    STANDARD_VM_CONTRACT;
-
-    HRESULT hr = S_OK;
-    
-    DWORD flags = m_VMFlags & VMFLAG_TRANSPARENCY_MASK;
-    DWORD extendedTypeFlags = 0;
-    bool needsExtendedTypeFlagsOutput = false;
-
-    if (flags != VMFLAG_TRANSPARENCY_TRANSPARENT)
-    {
-        _ASSERTE((VMFLAG_TRANSPARENCY_MASK == 0x1C));
-        flags = (flags >> 2);
-        extendedTypeFlags |= flags;
-        needsExtendedTypeFlagsOutput = true;
-    }
-    else
-    {
-        extendedTypeFlags |= EXTENDED_TYPE_FLAG_SF_TRANSPARENT;
-    }
-
-#ifdef FEATURE_COMINTEROP
-    // Handle EXTENDED_TYPE_FLAG_PLATFORM_NEEDS_PER_TYPE_RCW_DATA
-    // This flag should only be set for platform types (In Windows.winmd, and in mscorlib/system.dll)
-    bool fBinderHandledNeedsPerTypeRCWDataCase = IsInterface() && GetMethodTable()->GetModule()->GetAssembly()->IsWinMD() && (GetVarianceInfo() != NULL);
-
-    if (!fBinderHandledNeedsPerTypeRCWDataCase && GetMethodTable()->HasRCWPerTypeData())
-    {
-        // This should only happen for runtime components that ship in box. Assert that this is the case. The flag is not a versionable flag.
-
-        // This checks that the assembly is either part of the tpa list, or a winmd file.
-#ifdef FEATURE_CORECLR
-        _ASSERTE("MDIL Compiler has determined that a winrt type needs per-type-RCW data, but is not a platform type." && 
-            (GetMethodTable()->GetModule()->GetAssembly()->GetManifestFile()->IsProfileAssembly() || 
-             GetMethodTable()->GetModule()->GetAssembly()->IsWinMD() ||
-             GetWinRTRedirectedTypeIndex() != WinMDAdapter::RedirectedTypeIndex_Invalid));
-#endif
-#ifdef _DEBUG
-        if (GetMethodTable()->GetModule()->GetAssembly()->IsWinMD())
-        {
-            // If this is a WinMD file, verify the namespace is Windows. something.
-            DefineFullyQualifiedNameForClass();
-            const char * pszFullyQualifiedName = GetFullyQualifiedNameForClass(this->GetMethodTable());
-
-            if (strncmp(pszFullyQualifiedName, "Windows.", 8) != 0)
-            {
-                _ASSERTE(!"MDIL Compiler has determined that a winrt type needs per-type-RCW data, but that the binder will not generate it, and the flag to generate it is not part of versionable MDIL.");
-            }
-        }
-#endif
-        extendedTypeFlags |= EXTENDED_TYPE_FLAG_PLATFORM_NEEDS_PER_TYPE_RCW_DATA;
-        needsExtendedTypeFlagsOutput = true;
-    }
-#endif // FEATURE_COMINTEROP
-
-    if (needsExtendedTypeFlagsOutput)
-        pICLW->ExtendedTypeFlags(extendedTypeFlags);
-
-    return hr;
-}
-
-#ifdef FEATURE_COMINTEROP
-struct RedirectedTypeToSpecialTypeConversion
-{
-    SPECIAL_TYPE type;
-};
-
-#define DEFINE_PROJECTED_TYPE(szWinRTNS, szWinRTName, szClrNS, szClrName, nClrAsmIdx, nContractAsmIdx, nWinRTIndex, nClrIndex, nWinMDTypeKind) \
-{ SPECIAL_TYPE_ ## nClrIndex },
-
-static const RedirectedTypeToSpecialTypeConversion g_redirectedSpecialTypeInfo[] =
-{
-#include "winrtprojectedtypes.h"
-};
-#undef DEFINE_PROJECTED_TYPE
-#endif
-
-//-------------------------------------------------------------------------------
-HRESULT EEClass::WriteCompactLayoutSpecialType(ICompactLayoutWriter *pICLW)
-{
-    STANDARD_VM_CONTRACT;
-
-    HRESULT hr = S_OK;
-    SPECIAL_TYPE type = SPECIAL_TYPE_INVALID;
-#ifdef FEATURE_COMINTEROP
-    // All types with winrt redirection indices are special types
-    WinMDAdapter::RedirectedTypeIndex typeIndex = GetWinRTRedirectedTypeIndex();
-    if (typeIndex != WinMDAdapter::RedirectedTypeIndex_Invalid)
-    {
-        type = g_redirectedSpecialTypeInfo[typeIndex].type;
-    }
-
-    // Additionally System.Collections.ICollection and System.Collections.Generics.ICollection<T> are special types
-    if (this->GetMethodTable()->GetModule()->IsSystem())
-    {
-        DefineFullyQualifiedNameForClass();
-        const char * pszFullyQualifiedName = GetFullyQualifiedNameForClass(this->GetMethodTable());
-
-        if (strcmp(pszFullyQualifiedName, g_CollectionsGenericCollectionItfName) == 0)
-        {
-            type = SPECIAL_TYPE_System_Collections_Generic_ICollection;
-        }
-        else if (::strcmp(pszFullyQualifiedName, g_CollectionsCollectionItfName) == 0)
-        {
-            type = SPECIAL_TYPE_System_Collections_ICollection;
-        }
-    }
-#endif
-
-    if (type != SPECIAL_TYPE_INVALID)
-    {
-        pICLW->SpecialType(type);
-    }
-
-    return hr;
-}
-
-//-------------------------------------------------------------------------------
-HRESULT EEClass::WriteCompactLayoutInterfaces(ICompactLayoutWriter *pICLW)
-{
-    STANDARD_VM_CONTRACT;
-
-    HRESULT hr = S_OK;
-
-    MethodTable *pMT = GetMethodTable();
-    IMDInternalImport *pMDImport = pMT->GetModule()->GetMDImport();
-    HENUMInternalHolder hEnumInterfaceImpl(pMDImport);
-    hEnumInterfaceImpl.EnumInit(mdtInterfaceImpl, pMT->GetCl());
-    DWORD interfaceCount = hEnumInterfaceImpl.EnumGetCount();
-
-    for (DWORD i = 0; i < interfaceCount; ++i)
-    {
-        mdInterfaceImpl ii;
-
-        if (!hEnumInterfaceImpl.EnumNext(&ii))
-        {   // Less interfaces than count reports is an error
-            return E_FAIL;
-        }
-
-        mdToken tkInterface;
-        IfFailThrow(pMDImport->GetTypeOfInterfaceImpl(ii, &tkInterface));
-
-        pICLW->ImplementInterface(tkInterface);
-    }
-
-    return hr;
-}
-
-//-------------------------------------------------------------------------------
-HRESULT EEClass::WriteCompactLayoutInterfaceImpls(ICompactLayoutWriter *pICLW)
-{
-    STANDARD_VM_CONTRACT;
-
-    HRESULT hr = S_OK;
-
-    MethodTable *pMT = GetMethodTable();
-
-    if (pMT->HasDispatchMap())
-    {
-        DispatchMap::Iterator it(pMT);
-        for (; it.IsValid(); it.Next())
-        {
-            DispatchMapEntry *pEntry = it.Entry();
-            CONSISTENCY_CHECK(pEntry->GetTypeID().IsImplementedInterface());
-
-            CONSISTENCY_CHECK(pEntry->GetTypeID().GetInterfaceNum() < pMT->GetNumInterfaces());
-            MethodTable * pMTItf =
-                pMT->GetInterfaceMap()[pEntry->GetTypeID().GetInterfaceNum()].GetMethodTable();
-
-            //
-            // Determine the interface method token
-            //
-
-            MethodDesc *pMDItf = pMTItf->GetMethodDescForSlot(pEntry->GetSlotNumber());
-            mdToken tkItf = pICLW->GetTokenForMethodDesc(pMDItf, pMTItf);
-
-            //
-            // Determine the implementation method token
-            //
-
-//            CONSISTENCY_CHECK(!pEntry->IsVirtuallyMapped());
-            MethodDesc *pMDImpl = pMT->GetMethodDescForSlot(pEntry->GetTargetSlotNumber());
-            mdToken tkImpl = pICLW->GetTokenForMethodDesc(pMDImpl);
-
-            //
-            // Serialize
-            //
-
-            pICLW->ImplementInterfaceMethod(tkItf, tkImpl);
-        }
-    }
-
-    return hr;
-}
-
-//-------------------------------------------------------------------------------
-struct SortField
-{
-    int origIndex;
-    ULONG offset;
-};
-
-//-------------------------------------------------------------------------------
-int _cdecl FieldCmpOffsets(const void *a, const void *b)
-{
-    LIMITED_METHOD_CONTRACT;
-
-    const SortField *fa = (const SortField *)a;
-    const SortField *fb = (const SortField *)b;
-    if (fa->offset < fb->offset)
-        return -1;
-    if (fa->offset > fb->offset)
-        return 1;
-    return 0;
-}
-
-#ifdef SORT_BY_RID
-//-------------------------------------------------------------------------------
-struct SortFieldRid
-{
-    int origIndex;
-    ULONG rid;
-};
-
-//-------------------------------------------------------------------------------
-int _cdecl FieldCmpRids(const void *a, const void *b)
-{
-    LIMITED_METHOD_CONTRACT;
-
-    const SortFieldRid *fa = (const SortFieldRid *)a;
-    const SortFieldRid *fb = (const SortFieldRid *)b;
-    if (fa->rid < fb->rid)
-        return -1;
-    if (fa->rid > fb->rid)
-        return 1;
-    return 0;
-}
-
-#endif //SORT_BY_RID
-//-------------------------------------------------------------------------------
-inline PTR_FieldDesc EEClass::GetFieldDescByIndex(DWORD fieldIndex)
-{
-    STANDARD_VM_CONTRACT;
-
-    WRAPPER_NO_CONTRACT;
-    MethodTable * pMT = GetMethodTable();
-    CONSISTENCY_CHECK(fieldIndex < (DWORD)(pMT->GetNumIntroducedInstanceFields()) + (DWORD)GetNumStaticFields());
-
-    // MDIL_NEEDS_REVIEW
-    // was previously: return GetApproxFieldDescListPtr() + fieldIndex;
-
-    return pMT->GetApproxFieldDescListRaw() + fieldIndex;
-}
-
-HRESULT EEClass::WriteCompactLayoutFields(ICompactLayoutWriter *pICLW)
-{
-    STANDARD_VM_CONTRACT;
-
-    HRESULT hr = S_OK;
-
-    DWORD dwFieldCount = GetMethodTable()->GetNumIntroducedInstanceFields() + GetNumStaticFields();
-
-
-#ifdef SORT_BY_RID
-    typedef CQuickArray<SortFieldRid> SortFieldArray;
-    SortFieldArray fields;
-    fields.AllocThrows(dwFieldCount);
-    for (DWORD i = 0; i < dwFieldCount; i++)
-    {
-        FieldDesc *fieldDesc = GetFieldDescByIndex(i);
-        fields[i].origIndex = i;
-        fields[i].rid = fieldDesc->GetMemberDef();
-    }
-
-    qsort(fields.Ptr(), dwFieldCount, sizeof(SortFieldRid), FieldCmpRids);
-#else
-    //
-    // Build an index for the fields sorted by offset so that they are serialized
-    // in the same order as they should be deserialized.
-    //
-
-    typedef CQuickArray<SortField> SortFieldArray;
-    SortFieldArray fields;
-    fields.AllocThrows(dwFieldCount);
-    for (DWORD i = 0; i < dwFieldCount; i++)
-    {
-        FieldDesc *fieldDesc = GetFieldDescByIndex(i);
-        fields[i].origIndex = i;
-        fields[i].offset = fieldDesc->GetOffset();
-    }
-
-    qsort(fields.Ptr(), dwFieldCount, sizeof(SortField), FieldCmpOffsets);
-#endif
-
-    //
-    // For each field, gather information and then serialize
-    //
-#ifdef DEBUG_LAYOUT
-    printf("%s %08x (baseSize = %x  instance field bytes = %x  number of virtuals = %x):\n", GetMethodTable()->IsValueType() ? "Struct" : "Class", GetMethodTable()->GetCl(), GetMethodTable()->GetBaseSize(), GetMethodTable()->GetNumInstanceFieldBytes(), GetMethodTable()->GetNumVirtuals());
-#endif
-
-    for (DWORD i = 0; i < dwFieldCount; i++)
-    {
-        FieldDesc *pFD = GetFieldDescByIndex(fields[i].origIndex);
-
-        mdFieldDef tkField = pFD->GetMemberDef();
-
-        //
-        // Determine storage type of the field
-        //
-
-        ICompactLayoutWriter::FieldStorage fieldStorage = ICompactLayoutWriter::FS_INSTANCE;
-        if (pFD->IsStatic())
-        {
-            if (pFD->IsThreadStatic())
-            {
-                fieldStorage = ICompactLayoutWriter::FS_THREADLOCAL;
-            }
-            else if (pFD->IsContextStatic())
-            {
-                fieldStorage = ICompactLayoutWriter::FS_CONTEXTLOCAL;
-            }
-            else if (pFD->IsRVA())
-            {
-                fieldStorage = ICompactLayoutWriter::FS_RVA;
-            }
-            else
-            {
-                fieldStorage = ICompactLayoutWriter::FS_STATIC;
-            }
-        }
-
-        //
-        // Determine protection of the field
-        //
-
-        ICompactLayoutWriter::FieldProtection fieldProtection;
-        switch (pFD->GetFieldProtection())
-        {
-        case fdPrivateScope:
-            fieldProtection = ICompactLayoutWriter::FP_PRIVATE_SCOPE;
-            break;
-        case fdPrivate:
-            fieldProtection = ICompactLayoutWriter::FP_PRIVATE;
-            break;
-        case fdFamANDAssem:
-            fieldProtection = ICompactLayoutWriter::FP_FAM_AND_ASSEM;
-            break;
-        case fdAssembly:
-            fieldProtection = ICompactLayoutWriter::FP_ASSEMBLY;
-            break;
-        case fdFamily:
-            fieldProtection = ICompactLayoutWriter::FP_FAMILY;
-            break;
-        case fdFamORAssem:
-            fieldProtection = ICompactLayoutWriter::FP_FAM_OR_ASSEM;
-            break;
-        case fdPublic:
-            fieldProtection = ICompactLayoutWriter::FP_PUBLIC;
-            break;
-        default:
-            UNREACHABLE();
-        }
-
-        //
-        // If the field is a ValueType, retrieve the token for it.
-        //
-        // NOTE: can't just grab the TypeHandle for the field and return
-        //       that token because the type could reside in another
-        //       metadata scope.
-        //
-
-        mdToken tkValueType = mdTokenNil;
-        CorElementType fieldType = pFD->GetFieldType();
-        PCCOR_SIGNATURE pSig;
-        DWORD           cbSig;
-        pFD->GetSig(&pSig, &cbSig);
-
-        SigPointer sigPointer(pSig, cbSig);
-        sigPointer.GetCallingConv(NULL);
-        CorElementType elType;
-        sigPointer.GetElemType(&elType);
-        switch (elType)
-        {
-        case    ELEMENT_TYPE_BOOLEAN:
-        case    ELEMENT_TYPE_CHAR:
-        case    ELEMENT_TYPE_I1:
-        case    ELEMENT_TYPE_U1:
-        case    ELEMENT_TYPE_I2:
-        case    ELEMENT_TYPE_U2:
-        case    ELEMENT_TYPE_I4:
-        case    ELEMENT_TYPE_U4:
-        case    ELEMENT_TYPE_I8:
-        case    ELEMENT_TYPE_U8:
-        case    ELEMENT_TYPE_R4:
-        case    ELEMENT_TYPE_R8:
-        case    ELEMENT_TYPE_PTR:
-        case    ELEMENT_TYPE_BYREF:
-        case    ELEMENT_TYPE_I:
-        case    ELEMENT_TYPE_U:
-        case    ELEMENT_TYPE_FNPTR:
-            _ASSERTE(fieldType == elType);
-            break;
-
-        case    ELEMENT_TYPE_VALUETYPE:
-            sigPointer.GetToken(&tkValueType);
-            if (TypeFromToken(tkValueType) != mdtTypeDef)
-                fieldType = ELEMENT_TYPE_VALUETYPE;
-            break;
-
-        case    ELEMENT_TYPE_VAR:
-            fieldType = ELEMENT_TYPE_VALUETYPE;
-            // fall thru
-        case    ELEMENT_TYPE_GENERICINST:
-            if (fieldType != ELEMENT_TYPE_VALUETYPE)
-            {
-                // Force valuetypes not defined in this module from tokens instead of taking advantage of the knowledge
-                // that this is an enum type.
-                CorElementType elemTypeGeneric;
-                IfFailThrow(sigPointer.GetElemType(&elemTypeGeneric));
-                if (elemTypeGeneric == ELEMENT_TYPE_VALUETYPE)
-                {
-                    mdToken tkValueTypeSig;
-                    IfFailThrow(sigPointer.GetToken(&tkValueTypeSig));
-                    if (TypeFromToken(tkValueTypeSig) != mdtTypeDef)
-                    {
-                        fieldType = ELEMENT_TYPE_VALUETYPE;
-                    }
-                }
-            }
-            tkValueType = pICLW->GetTypeSpecToken(pSig+1, cbSig-1);
-            break;
-
-        case    ELEMENT_TYPE_STRING:
-        case    ELEMENT_TYPE_CLASS:
-        case    ELEMENT_TYPE_OBJECT:
-        case    ELEMENT_TYPE_SZARRAY:
-        case    ELEMENT_TYPE_ARRAY:
-            _ASSERTE(fieldType == ELEMENT_TYPE_CLASS);
-            break;
-
-        case    ELEMENT_TYPE_MVAR:
-            printf("elType = %d\n", elType);
-            _ASSERTE(!"unexpected field type");
-            break;
-
-        default:
-            printf("elType = %d\n", elType);
-            break;
-        }
-
-        //
-        // Record this field
-        //
-
-        pICLW->Field(tkField,
-                     fieldStorage,
-                     fieldProtection,
-                     fieldType,
-                     (HasExplicitFieldOffsetLayout() || pFD->IsRVA()) ? pFD->GetOffset() : ~0,
-                     tkValueType);
-    }
-
-#ifdef DEBUG_LAYOUT
-    // dump field offsets in token order
-    mdFieldDef lowestFieldToken = ~0;
-    for (DWORD i = 0; i < dwFieldCount; i++)
-    {
-        FieldDesc *pFD = GetFieldDescByIndex(i);
-        mdFieldDef tkField = pFD->GetMemberDef();
-        if (lowestFieldToken >= tkField)
-            lowestFieldToken = tkField;
-    }
-    // print fields in token order - this is quadratic in the number of fields,
-    // but it's just debug output after all
-
-    for (DWORD i = 0; i < dwFieldCount; i++)
-    {
-        mdFieldDef tkField = lowestFieldToken + i;
-        bool fFound = false;
-        for (DWORD i = 0; i < dwFieldCount; i++)
-        {
-            FieldDesc *pFD = GetFieldDescByIndex(i);
-            if (tkField == pFD->GetMemberDef())
-            {
-                printf("  Field %08x of type %x has offset %x\n", tkField, pFD->GetFieldType(), pFD->GetOffset());
-                fFound = true;
-            }
-        }
-        if (!fFound)
-        {
-            printf("  >>>> Gap for field token %08x\n", tkField);
-        }
-    }
-#endif
-
-    if (HasLayout())
-    {
-        // see if we have a field marshaler for this field
-        EEClassLayoutInfo *eeClassLayoutInfo = GetLayoutInfo();
-        
-        FieldMarshaler *pFM = eeClassLayoutInfo->m_pFieldMarshalers;
-        FieldMarshaler *pFMEnd = (FieldMarshaler*) ((BYTE *)pFM + eeClassLayoutInfo->m_numCTMFields*MAXFIELDMARSHALERSIZE);
-        while (pFM < pFMEnd)
-        {
-//          printf("Field %08x  native type = %x  external offset = %x\n", tkField, pFM->GetNStructFieldType(), pFM->GetExternalOffset());
-
-            NStructFieldType type = pFM->GetNStructFieldType();
-            DWORD count = 0;
-            DWORD flags = 0;
-            DWORD typeToken1 = 0;
-            DWORD typeToken2 = 0;
-
-#define NFT_CASE_VERIFICATION_TYPE_NAME(type) nftMissingFromEEClass_WriteCompactLayoutFields_ ## type
-
-            switch (type)
-            {
-            NFT_CASE(NFT_NONE)
-            NFT_CASE(NFT_STRINGUNI)
-            NFT_CASE(NFT_COPY1)
-            NFT_CASE(NFT_COPY2)
-            NFT_CASE(NFT_COPY4)
-            NFT_CASE(NFT_COPY8)
-            NFT_CASE(NFT_CBOOL)
-            NFT_CASE(NFT_DATE)
-            NFT_CASE(NFT_DECIMAL)
-            NFT_CASE(NFT_WINBOOL)
-            NFT_CASE(NFT_SAFEHANDLE)
-            NFT_CASE(NFT_CRITICALHANDLE)
-#ifdef FEATURE_COMINTEROP
-            NFT_CASE(NFT_BSTR)
-            NFT_CASE(NFT_VARIANT)
-            NFT_CASE(NFT_VARIANTBOOL)
-            NFT_CASE(NFT_CURRENCY)
-            NFT_CASE(NFT_DATETIMEOFFSET)
-            NFT_CASE(NFT_HSTRING)
-            NFT_CASE(NFT_WINDOWSFOUNDATIONHRESULT)
-            NFT_CASE(NFT_SYSTEMTYPE)
-#endif // FEATURE_COMINTEROP
-                // no additional info for these
-                break;
-
-            NFT_CASE(NFT_STRINGANSI)
-                {
-                    FieldMarshaler_StringAnsi *pFM_StringAnsi = (FieldMarshaler_StringAnsi*)pFM;
-                    if (pFM_StringAnsi->GetBestFit())
-                        flags |= ICompactLayoutWriter::NF_BESTFITMAP;
-                    if (pFM_StringAnsi->GetThrowOnUnmappableChar())
-                        flags |= ICompactLayoutWriter::NF_THROWONUNMAPPABLECHAR;
-                }
-                break;
-
-            NFT_CASE(NFT_FIXEDSTRINGUNI)
-                {
-                    count = pFM->NativeSize()/sizeof(WCHAR);
-                }
-                break;
-
-            NFT_CASE(NFT_FIXEDSTRINGANSI)
-                {
-                    FieldMarshaler_FixedStringAnsi *pFM_FixedStringAnsi = (FieldMarshaler_FixedStringAnsi*)pFM;
-                    if (pFM_FixedStringAnsi->GetBestFit())
-                        flags |= ICompactLayoutWriter::NF_BESTFITMAP;
-                    if (pFM_FixedStringAnsi->GetThrowOnUnmappableChar())
-                        flags |= ICompactLayoutWriter::NF_THROWONUNMAPPABLECHAR;
-                    count = pFM->NativeSize()/sizeof(CHAR);
-                }
-                break;
-
-            NFT_CASE(NFT_FIXEDCHARARRAYANSI)
-                {
-                    FieldMarshaler_FixedCharArrayAnsi *pFM_FixedCharArrayAnsi = (FieldMarshaler_FixedCharArrayAnsi*)pFM;
-                    if (pFM_FixedCharArrayAnsi->GetBestFit())
-                        flags |= ICompactLayoutWriter::NF_BESTFITMAP;
-                    if (pFM_FixedCharArrayAnsi->GetThrowOnUnmappableChar())
-                        flags |= ICompactLayoutWriter::NF_THROWONUNMAPPABLECHAR;
-                    count = pFM->NativeSize()/sizeof(CHAR);
-                }
-                break;
-
-            NFT_CASE(NFT_FIXEDARRAY)
-                {
-                    FieldMarshaler_FixedArray *pFM_FixedArray = (FieldMarshaler_FixedArray*)pFM;
-                    MethodTable *pMT = pFM_FixedArray->GetElementTypeHandle().AsMethodTable();
-                    typeToken1 = pICLW->GetTokenForType(pMT);
-
-                    /* do we need this information? there are no accessors...
-                    if (pFM_FixedArray->GetBestFit())
-                        flags |= ICompactLayoutWriter::NF_BESTFITMAP;
-                    if (pFM_FixedArray->GetThrowOnUnmappableChar())
-                        flags |= ICompactLayoutWriter::NF_THROWONUNMAPPABLECHAR;
-                    */
-                    flags |= pFM_FixedArray->GetElementVT() << ICompactLayoutWriter::NF_VARTYPE_SHIFT;
-                    count = pFM->NativeSize()/OleVariant::GetElementSizeForVarType(pFM_FixedArray->GetElementVT(), pMT);
-                }
-                break;
-
-            NFT_CASE(NFT_DELEGATE)
-                {
-                    MethodTable *pMT = ((FieldMarshaler_Delegate*)pFM)->GetMethodTable();
-                    typeToken1 = pICLW->GetTokenForType(pMT);
-                }
-                break;
-
-            NFT_CASE(NFT_ANSICHAR)
-                {
-                    FieldMarshaler_Ansi *pFM_Ansi = (FieldMarshaler_Ansi*)pFM;
-                    if (pFM_Ansi->GetBestFit())
-                        flags |= ICompactLayoutWriter::NF_BESTFITMAP;
-                    if (pFM_Ansi->GetThrowOnUnmappableChar())
-                        flags |= ICompactLayoutWriter::NF_THROWONUNMAPPABLECHAR;
-                }
-                break;
-
-            NFT_CASE(NFT_NESTEDLAYOUTCLASS)
-                {
-                    MethodTable *pMT = ((FieldMarshaler_NestedLayoutClass*)pFM)->GetMethodTable();
-                    typeToken1 = pICLW->GetTokenForType(pMT);
-                }
-                break;
-
-            NFT_CASE(NFT_NESTEDVALUECLASS)
-                {
-                    MethodTable *pMT = ((FieldMarshaler_NestedValueClass*)pFM)->GetMethodTable();
-                    typeToken1 = pICLW->GetTokenForType(pMT);
-                }
-                break;
-
-#ifdef FEATURE_COMINTEROP
-            NFT_CASE(NFT_INTERFACE)
-                {
-                    FieldMarshaler_Interface *pFM_Interface = (FieldMarshaler_Interface*)pFM;
-                    MethodTable *pMT = pFM_Interface->GetMethodTable();
-                    typeToken1 = pICLW->GetTokenForType(pMT);
-                    MethodTable *ppItfMT = NULL;
-                    pFM_Interface->GetInterfaceInfo(&ppItfMT, &flags);
-                    typeToken2 = pICLW->GetTokenForType(ppItfMT);
-                }
-                break;
-
-                NFT_CASE(NFT_WINDOWSFOUNDATIONIREFERENCE)
-                {
-                    FieldMarshaler_Nullable *pFM_Nullable = (FieldMarshaler_Nullable*)pFM;
-                    MethodTable *pMT = pFM_Nullable->GetMethodTable();
-                    typeToken1 = pICLW->GetTokenForType(pMT);
-                }
-                break;
-
-#ifdef FEATURE_CLASSIC_COMINTEROP
-            NFT_CASE(NFT_SAFEARRAY)
-                {
-                    FieldMarshaler_SafeArray *pFM_SafeArray = (FieldMarshaler_SafeArray*)pFM;
-                    MethodTable *pMT = pFM_SafeArray->GetElementTypeHandle().AsMethodTable();
-                    typeToken1 = pICLW->GetTokenForType(pMT);
-                    flags = pFM_SafeArray->GetElementVT() << ICompactLayoutWriter::NF_VARTYPE_SHIFT;
-                }
-                break;
-#endif //FEATURE_CLASSIC_COMINTEROP
-
-#endif // FEATURE_COMINTEROP
-            NFT_CASE(NFT_ILLEGAL)
-                // do we need this one even? do we need additional info?
-                break;
-#ifndef FEATURE_COMINTEROP
-            NFT_CASE(NFT_INTERFACE)
-#endif
-            default:
-#define NFT_VERIFY_ALL_CASES
-#include "nsenumhandleallcases.h"
-                _ASSERTE(!"unexpected native type");
-                break;
-
-            }
-
-            pICLW->NativeField(pFM->GetFieldDesc()->GetMemberDef(),
-                               type,
-                               pFM->GetExternalOffset(),
-                               count,
-                               flags,
-                               typeToken1,
-                               typeToken2);
-
-            ((BYTE*&)pFM) += MAXFIELDMARSHALERSIZE;
-        }
-    }
-
-    if (HasExplicitFieldOffsetLayout() || HasLayout() && GetLayoutInfo()->HasExplicitSize())
-    {
-        pICLW->SizeType(GetMethodTable()->GetNumInstanceFieldBytes());
-    }
-
-    return hr;
-}
-
-//-------------------------------------------------------------------------------
-HRESULT EEClass::WriteCompactLayoutMethods(ICompactLayoutWriter *pICLW)
-{
-    // we need this iterator because we want the method descs in declaration order,
-    // but the chunks are in reverse order
-    class ReversedChunkMethoditerator
-    {
-    private:
-        MethodDesc *m_methodDesc;
-    public:
-        ReversedChunkMethoditerator(MethodTable *pMT)
-        {
-            m_methodDesc = NULL;
-            MethodDescChunk *pChunk = pMT->GetClass()->GetChunks();
-            if (pChunk == NULL)
-                return;
-            while (pChunk->GetNextChunk() != NULL)
-                pChunk = pChunk->GetNextChunk();
-            m_methodDesc = pChunk->GetFirstMethodDesc();
-        }
-
-        bool IsValid()
-        {
-            return m_methodDesc != NULL;
-        }
-
-        MethodDesc *GetMethodDesc()
-        {
-            return m_methodDesc;
-        }
-
-        void Next()
-        {
-            MethodDescChunk * pChunk = m_methodDesc->GetMethodDescChunk();
-
-            // Check whether the next MethodDesc is still within the bounds of the current chunk
-            TADDR pNext = dac_cast<TADDR>(m_methodDesc) + m_methodDesc->SizeOf();
-            TADDR pEnd = dac_cast<TADDR>(pChunk) + pChunk->SizeOf();
-
-            if (pNext < pEnd)
-            {
-                // Just skip to the next method in the same chunk
-                m_methodDesc = PTR_MethodDesc(pNext);
-            }
-            else
-            {
-                _ASSERTE(pNext == pEnd);
-
-                // We have walked all the methods in the current chunk. Move on
-                // to the previous chunk.
-                MethodDescChunk *pPrevChunk = m_methodDesc->GetClass()->GetChunks();
-                if (pPrevChunk == pChunk)
-                    m_methodDesc = NULL;
-                else
-                {
-                    while (pPrevChunk->GetNextChunk() != pChunk)
-                        pPrevChunk = pPrevChunk->GetNextChunk();
-                    m_methodDesc = pPrevChunk->GetFirstMethodDesc();
-                }
-            }
-        }
-    };
-
-    HRESULT hr = S_OK;
-
-//    printf("New virtuals of class %08x\n", GetCl());
-
-    MethodTable *pMT = GetMethodTable();
-    DWORD dwNumParentVirtuals = pMT->GetNumParentVirtuals();
-    IMDInternalImport *pMDImport = pMT->GetModule()->GetMDImport();
-
-    ReversedChunkMethoditerator it(GetMethodTable());
-    WORD lastNewSlotIndex = 0;
-    mdMethodDef tkUnboxingStubNeedsImpl = 0;
-    for (; it.IsValid(); it.Next())
-    {
-        MethodDesc *pMD = it.GetMethodDesc();
-
-        // skip unboxing stubs
-        if (pMD->IsUnboxingStub())
-        {
-            if (pMD->IsMethodImpl())
-                tkUnboxingStubNeedsImpl = pMD->GetMemberDef();
-            continue;
-        }
-
-        mdMethodDef tkMethod = pMD->GetMemberDef();
-
-        //
-        // Gather method information
-        //
-
-        DWORD dwDeclFlags = pMD->GetAttrs();
-        ULONG ulCodeRVA;
-        DWORD dwImplFlags;
-        pMDImport->GetMethodImplProps(tkMethod, &ulCodeRVA, &dwImplFlags);
-
-        //
-        // Figure out if this method overrides a parent method, and
-        // if so find or generate the corresponding token.
-        //
-
-        mdToken tkOverrideMethod = mdTokenNil;
-        WORD slotIndex = pMD->GetSlot();
-        if (pMT->IsValueType() && pMD->IsVirtual())
-        {
-            MethodDesc *pBoxedMD = MethodDesc::FindOrCreateAssociatedMethodDesc(pMD,
-                                                                                pMD->GetMethodTable(),
-                                                                                TRUE /* get unboxing entry point */,
-                                                                                pMD->GetMethodInstantiation(),
-                                                                                FALSE /* no allowInstParam */ );
-            if (pBoxedMD != NULL)
-                slotIndex = pBoxedMD->GetSlot();
-        }
-
-#ifdef DEBUG_LAYOUT
-        if (pMD->IsVirtual())
-            printf("  virtual method %08x has slot %x\n", tkMethod, slotIndex);
-#endif
-        if (slotIndex < dwNumParentVirtuals)
-        {
-            MethodTable *pParentMT = pMT->GetParentMethodTable();
-            MethodDesc *pParentMD = pParentMT->GetMethodDescForSlot(slotIndex)->GetDeclMethodDesc(slotIndex);
-            tkOverrideMethod = pICLW->GetTokenForMethodDesc(pParentMD);
-        }
-
-        //
-        // Figure out the implHints - they consist of the classification
-        // and various flags for special methods
-        //
-
-        DWORD dwImplHints = pMD->GetClassification();
-        if (pMT->HasDefaultConstructor() && slotIndex == pMT->GetDefaultConstructorSlot())
-            dwImplHints |= ICompactLayoutWriter::IH_DEFAULT_CTOR;
-        else if (pMT->HasClassConstructor() && slotIndex == pMT->GetClassConstructorSlot())
-            dwImplHints |= ICompactLayoutWriter::IH_CCTOR;
-
-        if (pMD->IsCtor())
-            dwImplHints |= ICompactLayoutWriter::IH_CTOR;
-
-        if (IsDelegate())
-        {
-            DelegateEEClass *delegateEEClass = (DelegateEEClass *)this;
-            if (pMD == delegateEEClass->m_pInvokeMethod)
-                dwImplHints |= ICompactLayoutWriter::IH_DELEGATE_INVOKE;
-            else if (pMD == delegateEEClass->m_pBeginInvokeMethod)
-                dwImplHints |= ICompactLayoutWriter::IH_DELEGATE_BEGIN_INVOKE;
-            else if (pMD == delegateEEClass->m_pEndInvokeMethod)
-                dwImplHints |= ICompactLayoutWriter::IH_DELEGATE_END_INVOKE;
-        }
-
-
-        _ASSERTE((tkUnboxingStubNeedsImpl == 0) || (tkUnboxingStubNeedsImpl == tkMethod) 
-                 || !"This depends on unboxing stubs always being processed directly before the method they invoke");
-        // cannot use pMD->HasMethodImplSlot() because it has some false positives
-        // (virtual methods on valuetypes implementing interfaces have the flag bit set
-        //  but an empty list of replaced methods)
-        if (pMD->IsMethodImpl() || (tkUnboxingStubNeedsImpl == tkMethod))
-        {
-            dwImplHints |= ICompactLayoutWriter::IH_HASMETHODIMPL;
-        }
-
-        tkUnboxingStubNeedsImpl = 0;
-
-        // Make sure that the transparency is cached in the NGen image
-        //   (code copied from MethodDesc::Save (ngen code path))
-        // A side effect of this call is caching the transparency bits
-        // in the MethodDesc
-
-        Security::IsMethodTransparent(pMD);
-
-        if (pMD->HasCriticalTransparentInfo())
-        {
-            if (pMD->IsTreatAsSafe())
-            {
-                dwImplHints |= ICompactLayoutWriter::IH_TRANSPARENCY_TREAT_AS_SAFE;
-//                printf("  method %08x is treat as safe\n", tkMethod);
-            }
-            else if (pMD->IsTransparent())
-            {
-                dwImplHints |= ICompactLayoutWriter::IH_TRANSPARENCY_TRANSPARENT;
-//                printf("  method %08x is transparent\n", tkMethod);
-            }
-            else if (pMD->IsCritical())
-            {
-                dwImplHints |= ICompactLayoutWriter::IH_TRANSPARENCY_CRITICAL;
-//                printf("  method %08x is critical\n", tkMethod);
-            }
-            else
-               _ASSERTE(!"one of the above must be true, no?");
-        }
-        else
-        {
-            _ASSERTE((dwImplHints & ICompactLayoutWriter::IH_TRANSPARENCY_MASK) == ICompactLayoutWriter::IH_TRANSPARENCY_NO_INFO);
-//            printf("  method %08x has no critical transparent info\n", tkMethod);
-        }
-        
-        if (!pMD->IsAbstract() && !pMD->IsILStub() && !pMD->IsUnboxingStub() 
-            && pMD->IsIL())
-        {
-            EX_TRY 
-            {
-                if (pMD->IsVerifiable()) 
-                {
-                    dwImplHints |= ICompactLayoutWriter::IH_IS_VERIFIABLE;
-                }
-            }
-            EX_CATCH
-            {
-                // If the method has a security exception, it will fly through IsVerifiable. 
-                // We only expect to see internal CLR exceptions here, so use RethrowCorruptingExceptions
-            }
-            EX_END_CATCH(RethrowCorruptingExceptions)
-        }
-
-        if (pMD->IsVerified())
-        {
-            dwImplHints |= ICompactLayoutWriter::IH_IS_VERIFIED;
-        }
-
-        //
-        // Serialize the method
-        //
-
-        if (IsMdPinvokeImpl(dwDeclFlags))
-        {
-            _ASSERTE(tkOverrideMethod == mdTokenNil);
-            NDirectMethodDesc *pNMD = (NDirectMethodDesc *)pMD;
-            PInvokeStaticSigInfo pInvokeStaticSigInfo;
-            NDirect::PopulateNDirectMethodDesc(pNMD, &pInvokeStaticSigInfo);
-
-            pICLW->PInvokeMethod(dwDeclFlags,
-                          dwImplFlags,
-                          dwImplHints,
-                          tkMethod,
-                          pNMD->GetLibName(),
-                          pNMD->GetEntrypointName(),
-                          pNMD->ndirect.m_wFlags);
-        }
-        else
-        {
-            if (pMD->IsVirtual() && !tkOverrideMethod)
-            {
-//                printf("  Method %08x has new virtual slot %u\n", tkMethod, slotIndex);
-                // make sure new virtual slot indices are ascending - otherwise, the virtual slot indices
-                // created by the binder won't be consistent with ngen, which makes mix and match impossible
-                _ASSERTE(lastNewSlotIndex <= slotIndex);
-                lastNewSlotIndex = slotIndex;
-            }
-
-            pICLW->Method(dwDeclFlags,
-                          dwImplFlags,
-                          dwImplHints,
-                          tkMethod,
-                          tkOverrideMethod);
-
-            if (pMD->IsGenericMethodDefinition())
-            {
-                InstantiatedMethodDesc *pIMD = pMD->AsInstantiatedMethodDesc();
-                Instantiation inst = pIMD->GetMethodInstantiation();                
-                for (DWORD i = 0; i < inst.GetNumArgs(); i++)
-                {
-                    pICLW->GenericParameter(inst[i].AsGenericVariable()->GetToken(), 0);
-                }
-            }
-        }
-    }
-
-    return hr;
-}
-
-//-------------------------------------------------------------------------------
-HRESULT EEClass::WriteCompactLayoutMethodImpls(ICompactLayoutWriter *pICLW)
-{
-    HRESULT hr = S_OK;
-
-    MethodTable::IntroducedMethodIterator it(GetMethodTable());
-    for (; it.IsValid(); it.Next())
-    {
-        MethodDesc *pMDImpl = it.GetMethodDesc();
-        if (pMDImpl->IsMethodImpl())
-        {   // If this is a methodImpl, then iterate all implemented slots
-            // and serialize the (decl,impl) pair.
-            // This guarantees that all methodImpls for a particular method
-            // are "clustered" (if there is more than one)
-            MethodImpl::Iterator implIt(pMDImpl);
-            for (; implIt.IsValid(); implIt.Next())
-            {
-                MethodDesc *pMDDecl = implIt.GetMethodDesc();
-                // MethodImpls should no longer cover interface methodImpls, as that
-                // should be captured in the interface dispatch map.
-                CONSISTENCY_CHECK(!pMDDecl->IsInterface());
-
-                mdToken tkDecl = pICLW->GetTokenForMethodDesc(pMDDecl);
-                pICLW->MethodImpl(tkDecl, pMDImpl->GetMemberDef());
-            }
-        }
-    }
-
-    return hr;
-}
-#endif //MDIL
-#endif

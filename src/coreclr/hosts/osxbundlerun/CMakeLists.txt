@@ -9,7 +9,7 @@ set(CORERUN_SOURCES
     osxbundlerun.cpp 
 )
 
-add_executable(osxbundlerun
+_add_executable(osxbundlerun
     ${CORERUN_SOURCES}
 )
 
@@ -21,4 +21,4 @@ add_dependencies(osxbundlerun
     coreclr
 )
 
-install (TARGETS osxbundlerun DESTINATION .)
+install_clr(osxbundlerun)

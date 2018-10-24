@@ -11,12 +11,6 @@
 #include "thekey.h"
 #include "ecmakey.h"
 
-#ifdef FEATURE_STRONGNAME_TESTKEY_ALLOWED
-#include "thetestkey.h"
-
-BYTE g_rbTestKeyBuffer[] = { TEST_KEY_HEADER TEST_KEY_BUFFER };
-#endif // FEATURE_STRONGNAME_TESTKEY_ALLOWED
-
 //---------------------------------------------------------------------------------------
 //
 // Check to see if a public key blob is the ECMA public key blob
@@ -92,7 +86,6 @@ bool StrongNameIsTheKey(__in_ecount(cbKey) const BYTE *pbKey, DWORD cbKey)
     return (memcmp(pbKey, g_rbTheKey, sizeof(g_rbTheKey)) == 0);
 }
 
-#ifdef FEATURE_CORECLR
 //---------------------------------------------------------------------------------------
 //
 // Check to see if a public key blob is the Silverlight Platform public key blob
@@ -141,77 +134,6 @@ bool StrongNameIsSilverlightPlatformKey(const PublicKeyBlob &keyPublicKey)
     return StrongNameSizeOfPublicKey(keyPublicKey) == sizeof(g_rbTheSilverlightPlatformKey) &&
            memcmp(reinterpret_cast<const BYTE *>(&keyPublicKey), g_rbTheSilverlightPlatformKey, sizeof(g_rbTheSilverlightPlatformKey)) == 0;
 }
-#endif //FEATURE_CORECLR
-
-#ifdef FEATURE_STRONGNAME_TESTKEY_ALLOWED
-
-//---------------------------------------------------------------------------------------
-//
-// Check to see if a public key blob is the Silverlight Platform public key blob
-//
-// See code:g_rbTestKeyBuffer#TestKeyStamping
-//
-// Arguments:
-//   pbKey - public key blob to check
-//   cbKey - size in bytes of pbKey
-//
-
-bool StrongNameIsTestKey(__in_ecount(cbKey) const BYTE *pbKey, DWORD cbKey)
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-    // The key should be the same size as the ECMA key
-    if (cbKey != sizeof(g_rbTestKeyBuffer) - 2 * sizeof(GUID))
-    {
-        return false;
-    }
-
-    const PublicKeyBlob *pKeyBlob = reinterpret_cast<const PublicKeyBlob *>(pbKey);
-    return StrongNameIsTestKey(*pKeyBlob);
-}
-
-//---------------------------------------------------------------------------------------
-//
-// Determine if the public key blob is the test public key stamped into the VM.
-// 
-// See code:g_rbTestKeyBuffer#TestKeyStamping
-//
-// Arguments:
-//   keyPublicKey - public key blob to check for emptyness
-//
-
-bool StrongNameIsTestKey(const PublicKeyBlob &keyPublicKey)
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-    // Find the blob in the VM by looking past the two header GUIDs in the buffer
-    _ASSERTE(sizeof(g_rbTestKeyBuffer) > 2 * sizeof(GUID) + sizeof(PublicKeyBlob));
-    const PublicKeyBlob *pbTestPublicKey = reinterpret_cast<const PublicKeyBlob *>(g_rbTestKeyBuffer + 2 * sizeof(GUID));
-
-    DWORD cbTestPublicKey = StrongNameSizeOfPublicKey(*pbTestPublicKey);
-    DWORD cbCheckPublicKey = StrongNameSizeOfPublicKey(keyPublicKey);
-
-    // Check whether valid test key was stamped in
-    if (cbTestPublicKey == 0)
-        return false;
-
-    // This is the test public key if it is the same size as the public key in the buffer, and is identical
-    // to the test key as well.
-    return cbTestPublicKey == cbCheckPublicKey &&
-           memcmp(reinterpret_cast<const void *>(pbTestPublicKey), reinterpret_cast<const void *>(&keyPublicKey), cbTestPublicKey) == 0;
-}
-
-#endif // FEATURE_STRONGNAME_TESTKEY_ALLOWED
 
 //---------------------------------------------------------------------------------------
 //
@@ -299,7 +221,7 @@ bool StrongNameIsValidPublicKey(const PublicKeyBlob &keyPublicKey, bool fImportK
         return false;
     }
 
-#if !defined(FEATURE_CORECLR) || (defined(CROSSGEN_COMPILE) && !defined(PLATFORM_UNIX))
+#if (defined(CROSSGEN_COMPILE) && !defined(PLATFORM_UNIX))
     // Make sure the public key blob imports properly
     if (fImportKeys)
     {
@@ -315,9 +237,9 @@ bool StrongNameIsValidPublicKey(const PublicKeyBlob &keyPublicKey, bool fImportK
             return false;
         }
     }
-#else // !FEATURE_CORECLR || (CROSSGEN_COMPILE && !PLATFORM_UNIX)
+#else // (CROSSGEN_COMPILE && !PLATFORM_UNIX)
     _ASSERTE(!fImportKeys);
-#endif // !FEATURE_CORECLR || (CROSSGEN_COMPILE && !PLATFORM_UNIX)
+#endif // (CROSSGEN_COMPILE && !PLATFORM_UNIX)
 
     return true;
 }
@@ -344,7 +266,7 @@ DWORD StrongNameSizeOfPublicKey(const PublicKeyBlob &keyPublicKey)
            GET_UNALIGNED_VAL32(&keyPublicKey.cbPublicKey);  // the number of bytes in the key
 }
 
-#if !defined(FEATURE_CORECLR) || (defined(CROSSGEN_COMPILE) && !defined(PLATFORM_UNIX))
+#if (defined(CROSSGEN_COMPILE) && !defined(PLATFORM_UNIX))
 
 //---------------------------------------------------------------------------------------
 //
@@ -438,10 +360,10 @@ bool StrongNameCryptAcquireContext(HCRYPTPROV *phProv, LPCWSTR pwszContainer, LP
     {
         dwFlags &= ~CRYPT_MACHINE_KEYSET;
     }
-#endif // FEATURE_CRYPTO
+#endif // defined(CRYPT_VERIFYCONTEXT) && defined(CRYPT_MACHINE_KEYSET)
 
     return !!WszCryptAcquireContext(phProv, pwszContainer, pwszProvider, dwProvType, dwFlags);
 }
 
-#endif // !FEATURE_CORECLR || (CROSSGEN_COMPILE && !PLATFORM_UNIX)
+#endif // (CROSSGEN_COMPILE && !PLATFORM_UNIX)
 

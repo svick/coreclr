@@ -86,6 +86,7 @@
 #endif
 
 #define DIRECTORY_SEPARATOR_CHAR_A '\\'
+#define DIRECTORY_SEPARATOR_STR_A "\\"
 #define DIRECTORY_SEPARATOR_CHAR_W W('\\')
 #define DIRECTORY_SEPARATOR_STR_W W("\\")
 
@@ -140,31 +141,17 @@
 #define IMAGE_IMPORT_DESC_FIELD(img, f)     ((img).f)
 #endif
 
-//Remove these "unanonymous" unions from newer builds for now.  Confirm that they were never needed when we
-//bring back Rotor.
 #define IMAGE_RDE_ID(img) ((img)->Id)
-#ifndef IMAGE_RDE_ID
-#define IMAGE_RDE_ID(img)        ((img)->Id)
-#endif
 
 #define IMAGE_RDE_NAME(img) ((img)->Name)
-#ifndef IMAGE_RDE_NAME
-#define IMAGE_RDE_NAME(img)      ((img)->Name)
-#endif
 
 #define IMAGE_RDE_OFFSET(img) ((img)->OffsetToData)
-#ifndef IMAGE_RDE_OFFSET
-#define IMAGE_RDE_OFFSET(img)    ((img)->OffsetToData)
-#endif
 
 #ifndef IMAGE_RDE_NAME_FIELD
 #define IMAGE_RDE_NAME_FIELD(img, f)    ((img)->f)
 #endif
 
 #define IMAGE_RDE_OFFSET_FIELD(img, f) ((img)->f)
-#ifndef IMAGE_RDE_OFFSET_FIELD
-#define IMAGE_RDE_OFFSET_FIELD(img, f)  ((img)->f)
-#endif
 
 #ifndef IMAGE_FE64_FIELD
 #define IMAGE_FE64_FIELD(img, f)    ((img).f)
@@ -184,7 +171,7 @@
 // integer constants. 64-bit integer constants should be wrapped in the
 // declarations listed here.
 //
-// Each of the #defines here is wrapped to avoid conflicts with rotor_pal.h.
+// Each of the #defines here is wrapped to avoid conflicts with pal.h.
 
 #if defined(_MSC_VER)
 
@@ -484,7 +471,14 @@
 //  and it provides __declspec(selectany) to instruct the linker to merge
 //  duplicate external const static data copies into one.
 //  
+#if defined(SOURCE_FORMATTING)
+#define SELECTANY extern
+#else
 #define SELECTANY extern __declspec(selectany)
+#endif
+#if defined(SOURCE_FORMATTING)
+#define __annotation(x)
+#endif
         
 
 #if defined(_DEBUG_IMPL) && !defined(JIT_BUILD) && !defined(JIT64_BUILD) && !defined(CROSS_COMPILE) && !defined(_TARGET_ARM_) // @ARMTODO: no contracts for speed
@@ -608,6 +602,8 @@
 #if !defined(MAX_PATH_FNAME)
 #define MAX_PATH_FNAME   MAX_PATH /* max. length of full pathname */
 #endif
+
+#define __clr_reserved __reserved
 
 #endif // __PALCLR_H__
 

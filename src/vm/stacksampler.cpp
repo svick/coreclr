@@ -60,7 +60,7 @@
 //   JITting happened. But if we fail to acquire (ngen'ed method) or enter (unloaded domain) the original domain,
 //   we then try to JIT it under the thread's app domain in which the method was last seen to be executing.
 //
-// o The JIT to use is configurable with COMPLUS_AltJitName when COMPLUS_StackSampling is enabled.
+// o The JIT to use is configurable with COMPlus_AltJitName when COMPlus_StackSampling is enabled.
 //
 // o One use case is to collect traces as an .mc file from SuperPMI Shim JIT.
 //
@@ -154,7 +154,7 @@ bool IsGoodMethodDesc(MethodDesc* pMD)
 //
 // An opportunity to record the parameters passed to the JIT at the time of JITting this method.
 /* static */
-void StackSampler::RecordJittingInfo(MethodDesc* pMD, DWORD dwFlags, DWORD dwFlags2)
+void StackSampler::RecordJittingInfo(MethodDesc* pMD, CORJIT_FLAGS flags)
 {
     WRAPPER_NO_CONTRACT;
     if (g_pStackSampler == nullptr)
@@ -167,10 +167,10 @@ void StackSampler::RecordJittingInfo(MethodDesc* pMD, DWORD dwFlags, DWORD dwFla
         return;
     }
     // Record in the hash map.
-    g_pStackSampler->RecordJittingInfoInternal(pMD, dwFlags);
+    g_pStackSampler->RecordJittingInfoInternal(pMD, flags);
 }
 
-void StackSampler::RecordJittingInfoInternal(MethodDesc* pMD, DWORD dwFlags)
+void StackSampler::RecordJittingInfoInternal(MethodDesc* pMD, CORJIT_FLAGS flags)
 {
     ADID dwDomainId = GetThread()->GetDomain()->GetId();
     JitInfoHashEntry entry(pMD, dwDomainId);
@@ -195,11 +195,7 @@ ADID StackSampler::GetDomainId(MethodDesc* pMD, const ADID& defaultId)
     }
     if (bPresent != FALSE)
     {
-        AppDomainFromIDHolder pDomain(adId, FALSE);
-        if (!pDomain.IsUnloaded())
-        {
-            return adId;
-        }
+        return adId;
     }
     return defaultId;
 }
@@ -426,7 +422,7 @@ void StackSampler::JitAndCollectTrace(MethodDesc* pMD, const ADID& adId)
 
     // Indicate to the JIT or the JIT interface that we are JITting
     // in the background for stack sampling.
-    DWORD dwFlags2 = CORJIT_FLG2_SAMPLING_JIT_BACKGROUND;
+    CORJIT_FLAGS flags(CORJIT_FLAGS::CORJIT_FLAG_SAMPLING_JIT_BACKGROUND);
 
     _ASSERTE(pMD->IsIL());
 
@@ -447,7 +443,7 @@ void StackSampler::JitAndCollectTrace(MethodDesc* pMD, const ADID& adId)
             LOG((LF_JIT, LL_INFO100000, "%s:%s\n", pMD->GetMethodTable()->GetClass()->GetDebugClassName(), pMD->GetName())); 
 #endif
 
-            PCODE pCode = UnsafeJitFunction(pMD, pDecoder, 0, dwFlags2);
+            PCODE pCode = UnsafeJitFunction(pMD, pDecoder, flags);
         }
         END_DOMAIN_TRANSITION;
 

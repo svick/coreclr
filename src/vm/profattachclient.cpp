@@ -226,7 +226,7 @@ HRESULT ProfilingAPIAttachClient::AttachProfiler(
         return CORPROF_E_PROFILEE_PROCESS_NOT_FOUND;
     }
 
-    // Adjust time out value according to env var COMPLUS_ProfAPI_AttachProfilerTimeoutInMs
+    // Adjust time out value according to env var COMPlus_ProfAPI_AttachProfilerTimeoutInMs
     // The default is 10 seconds as we want to avoid client (trigger process) time out too early 
     // due to wait operation for concurrent GC in the server (profilee side)
     DWORD dwMillisecondsMinFromEnv = CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_ProfAPI_AttachProfilerMinTimeoutInMs);
@@ -673,8 +673,8 @@ HRESULT ProfilingAPIAttachClient::SignalAttachEvent(LPCWSTR wszEventName)
     }
 
     // Dealing directly with Windows event objects, not CLR event cookies, so
-    // using Win32 API directly.  Note that none of this code executes on rotor
-    // or if we're memory / sync-hosted, so the CLR wrapper is of no use to us anyway.
+    // using Win32 API directly.  Note that none of this code executes on Unix,
+    // so the CLR wrapper is of no use to us anyway.
 #pragma push_macro("SetEvent")
 #undef SetEvent
     if (!SetEvent(hAttachEvent))

@@ -22,13 +22,11 @@ inline InstantiatedMethodDesc* MethodDesc::AsInstantiatedMethodDesc() const
     return dac_cast<PTR_InstantiatedMethodDesc>(this);
 }
 
-#ifndef BINDER
 inline BOOL MethodDesc::IsDomainNeutral()
 {
     WRAPPER_NO_CONTRACT;
     return !IsLCGMethod() && GetDomain()->IsSharedDomain();
 }
-#endif // !BINDER
 
 inline BOOL MethodDesc::IsZapped()
 {
@@ -58,7 +56,6 @@ inline SigParser MethodDesc::GetSigParser()
     return SigParser(pSig, cSig);
 }
 
-#ifndef BINDER
 inline SigPointer MethodDesc::GetSigPointer()
 {
     WRAPPER_NO_CONTRACT;
@@ -69,7 +66,6 @@ inline SigPointer MethodDesc::GetSigPointer()
 
     return SigPointer(pSig, cSig);
 }
-#endif // !BINDER
 
 inline PTR_LCGMethodResolver DynamicMethodDesc::GetLCGMethodResolver()
 {
@@ -156,27 +152,6 @@ inline void MethodDesc::SetupGenericComPlusCall()
 }
 #endif // FEATURE_COMINTEROP
 
-#ifndef FEATURE_REMOTING
-
-inline BOOL MethodDesc::MayBeRemotingIntercepted()
-{
-    LIMITED_METHOD_CONTRACT;
-    return FALSE;
-}
-
-inline BOOL MethodDesc::IsRemotingInterceptedViaPrestub()
-{
-    LIMITED_METHOD_CONTRACT;
-    return FALSE;
-}
-
-inline BOOL MethodDesc::IsRemotingInterceptedViaVirtualDispatch()
-{
-    LIMITED_METHOD_CONTRACT;
-    return FALSE;
-}
-
-#endif // FEATURE_REMOTING
 
 #ifdef FEATURE_COMINTEROP
 
@@ -209,13 +184,21 @@ inline BOOL HasTypeEquivalentStructParameters()
 }
 #endif // FEATURE_TYPEEQUIVALENCE
 
-#ifndef BINDER
-inline ReJitManager * MethodDesc::GetReJitManager()
+#ifdef FEATURE_CODE_VERSIONING
+inline CodeVersionManager * MethodDesc::GetCodeVersionManager()
 {
     LIMITED_METHOD_CONTRACT;
-    return GetModule()->GetReJitManager();
+    return GetModule()->GetCodeVersionManager();
 }
-#endif // !BINDER
+#endif
+
+#ifdef FEATURE_TIERED_COMPILATION
+inline CallCounter * MethodDesc::GetCallCounter()
+{
+    LIMITED_METHOD_CONTRACT;
+    return GetModule()->GetCallCounter();
+}
+#endif
 
 #endif  // _METHOD_INL_
 

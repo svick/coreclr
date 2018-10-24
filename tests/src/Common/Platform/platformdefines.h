@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <cstdint>
 
 #ifndef _PLATFORMDEFINES__H
 #define _PLATFORMDEFINES__H
@@ -19,19 +20,44 @@
 #define FS_SEPERATOR L"\\"
 #define PATH_DELIMITER L";"
 #define L(t) L##t
-
+#define W(str)  L##str
 
 typedef unsigned error_t;
 typedef HANDLE THREAD_ID;
+
+#define DLL_EXPORT __declspec(dllexport)
 
 #else // !WINDOWS
 #include <pthread.h>
 
 typedef char16_t WCHAR;
-typedef unsigned long DWORD;
+typedef unsigned int DWORD;
 typedef int BOOL;
 typedef WCHAR *LPWSTR, *PWSTR;
 typedef const WCHAR *LPCWSTR, *PCWSTR;
+
+typedef long HRESULT;
+#define LONGLONG long long
+#define ULONGLONG unsigned LONGLONG
+typedef unsigned long ULONG, *PULONG;
+#define S_OK                    0x0
+#define SUCCEEDED(_hr)          ((HRESULT)(_hr) >= 0)
+#define FAILED(_hr)             ((HRESULT)(_hr) < 0)
+
+#ifdef ULONG_MAX
+#undef ULONG_MAX
+#endif
+#define ULONG_MAX     0xffffffffUL
+#define CCH_BSTRMAX 0x7FFFFFFF  // 4 + (0x7ffffffb + 1 ) * 2 ==> 0xFFFFFFFC
+#define CB_BSTRMAX 0xFFFFFFFa   // 4 + (0xfffffff6 + 2) ==> 0xFFFFFFFC
+
+#ifdef RC_INVOKED
+#define _HRESULT_TYPEDEF_(_sc) _sc
+#else // RC_INVOKED
+#define _HRESULT_TYPEDEF_(_sc) ((HRESULT)_sc)
+#endif // RC_INVOKED
+#define E_INVALIDARG                     _HRESULT_TYPEDEF_(0x80070057L)
+#define UInt32x32To64(a, b) ((unsigned __int64)((ULONG)(a)) * (unsigned __int64)((ULONG)(b)))
 
 #ifndef TRUE
 #define TRUE 1
@@ -41,27 +67,39 @@ typedef const WCHAR *LPCWSTR, *PCWSTR;
 #define FALSE 0
 #endif
 
-#define WINAPI   _cdecl
-#ifndef __stdcall
+#ifndef WINAPI
+#define WINAPI  __stdcall
+#endif
+
+#ifndef _MSC_VER
 #if __i386__
 #define __stdcall __attribute__((stdcall))
 #define _cdecl __attribute__((cdecl))
+#define __cdecl __attribute__((cdecl))
 #else
 #define __stdcall
 #define _cdecl
+#define __cdecl
 #endif
 #endif
 
-LPWSTR HackyConvertToWSTR(char* pszInput);
+#if __GNUC__ >= 4
+#define DLL_EXPORT __attribute__ ((visibility ("default")))
+#else
+#define DLL_EXPORT
+#endif
+
+LPWSTR HackyConvertToWSTR(const char* pszInput);
 
 #define FS_SEPERATOR L("/")
 #define PATH_DELIMITER L(":")
 #define L(t) HackyConvertToWSTR(t)
+#define W(str)  u##str
 #define MAX_PATH 260
 
 typedef pthread_t THREAD_ID;
 typedef void* (*MacWorker)(void*);
-typedef DWORD (*LPTHREAD_START_ROUTINE)(void*);
+typedef DWORD __stdcall (*LPTHREAD_START_ROUTINE)(void*);
 #ifdef UNICODE
 typedef WCHAR TCHAR;
 #else // ANSI
@@ -76,9 +114,11 @@ typedef void* HMODULE;
 typedef void* ULONG_PTR;
 typedef unsigned error_t;
 typedef void* LPVOID;
-typedef char BYTE;
+typedef unsigned char BYTE;
 typedef WCHAR OLECHAR;
 #endif
+
+typedef ULONG_PTR DWORD_PTR;
 
 //
 // Method declarations
@@ -86,7 +126,7 @@ typedef WCHAR OLECHAR;
 error_t TP_scpy_s(LPWSTR strDestination, size_t sizeInWords, LPCWSTR strSource);
 error_t TP_scat_s(LPWSTR strDestination, size_t sizeInWords, LPCWSTR strSource);
 int TP_slen(LPWSTR str);
-int TP_scmp_s(LPSTR str1, LPSTR str2);
+int TP_scmp_s(LPCSTR str1, LPCSTR str2);
 int TP_wcmp_s(LPWSTR str1, LPWSTR str2);
 error_t TP_getenv_s(size_t* pReturnValue, LPWSTR buffer, size_t sizeInWords, LPCWSTR varname);
 error_t TP_putenv_s(LPTSTR name, LPTSTR value);
@@ -98,6 +138,13 @@ DWORD TP_CreateThread(THREAD_ID* tThread, LPTHREAD_START_ROUTINE worker,  LPVOID
 void TP_JoinThread(THREAD_ID tThread);
 void TP_DebugBreak();
 DWORD TP_GetFullPathName(LPWSTR fileName, DWORD nBufferLength, LPWSTR lpBuffer);
+
+typedef WCHAR* BSTR;
+BSTR TP_SysAllocStringByteLen(LPSTR psz, size_t len);
+void TP_SysFreeString(BSTR bstr);
+size_t TP_SysStringByteLen(BSTR bstr);
+BSTR TP_SysAllocStringLen(LPWSTR psz, size_t len);
+BSTR TP_SysAllocString(LPWSTR psz);
 
 //
 // Method redirects

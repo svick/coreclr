@@ -8,7 +8,7 @@ set(CORECONSOLE_SOURCES
     coreconsole.cpp 
 )
 
-add_executable(coreconsole
+_add_executable(coreconsole
     ${CORECONSOLE_SOURCES}
 )
 
@@ -23,11 +23,12 @@ endif(NOT CMAKE_SYSTEM_NAME STREQUAL FreeBSD AND NOT CMAKE_SYSTEM_NAME STREQUAL 
 # pthread by the process executable ensures that all locks are initialized properly.
 target_link_libraries(coreconsole
     unixcoreruncommon
+)
+
+if(NOT CLR_CMAKE_PLATFORM_ANDROID)
+  target_link_libraries(coreconsole
     pthread
-)
+  )
+endif()
 
-add_dependencies(coreconsole
-    coreclr
-)
-
-install (TARGETS coreconsole DESTINATION .)
+install_clr(coreconsole)

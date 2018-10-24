@@ -45,13 +45,11 @@ typedef interface ICorDebugProcess4 ICorDebugProcess4;
 
 #endif 	/* __ICorDebugProcess4_FWD_DEFINED__ */
 
-
 #ifndef __ICorDebugLegacyNetCFHostCallbackInvoker_PrivateWindowsPhoneOnly_FWD_DEFINED__
 #define __ICorDebugLegacyNetCFHostCallbackInvoker_PrivateWindowsPhoneOnly_FWD_DEFINED__
 typedef interface ICorDebugLegacyNetCFHostCallbackInvoker_PrivateWindowsPhoneOnly ICorDebugLegacyNetCFHostCallbackInvoker_PrivateWindowsPhoneOnly;
 
 #endif 	/* __ICorDebugLegacyNetCFHostCallbackInvoker_PrivateWindowsPhoneOnly_FWD_DEFINED__ */
-
 
 /* header files for imported files */
 #include "cordebug.h"
@@ -161,7 +159,6 @@ EXTERN_C const IID IID_ICorDebugProcess4;
 
 
 #endif 	/* __ICorDebugProcess4_INTERFACE_DEFINED__ */
-
 
 #ifndef __ICorDebugLegacyNetCFHostCallbackInvoker_PrivateWindowsPhoneOnly_INTERFACE_DEFINED__
 #define __ICorDebugLegacyNetCFHostCallbackInvoker_PrivateWindowsPhoneOnly_INTERFACE_DEFINED__

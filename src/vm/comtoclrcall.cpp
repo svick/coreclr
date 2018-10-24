@@ -28,7 +28,6 @@
 #include "siginfo.hpp"
 #include "comcallablewrapper.h"
 #include "field.h"
-#include "security.h"
 #include "virtualcallstub.h"
 #include "dllimport.h"
 #include "mlinfo.h"
@@ -270,24 +269,6 @@ inline static void InvokeStub(ComCallMethodDesc *pCMD, PCODE pManagedTarget, OBJ
 
 #endif // _TARGET_X86_
 
-NOINLINE
-void InvokeStub_Hosted(ComCallMethodDesc *pCMD, PCODE pManagedTarget, OBJECTREF orThis, ComMethodFrame *pFrame, Thread *pThread,
-                       UINT64* pRetValOut)
-{
-    LIMITED_METHOD_CONTRACT;
-    _ASSERTE(CLRTaskHosted());
-
-    ReverseEnterRuntimeHolderNoThrow REHolder;
-    HRESULT hr = REHolder.AcquireNoThrow(); 
-    if (FAILED(hr))
-    {
-        *pRetValOut = hr;
-        return;
-    }
-
-    InvokeStub(pCMD, pManagedTarget, orThis, pFrame, pThread, pRetValOut);
-}
-
 #if defined(_MSC_VER) && !defined(_DEBUG)
 #pragma optimize("t", on)   // optimize for speed
 #endif 
@@ -440,54 +421,7 @@ void COMToCLRInvokeTarget(PCODE pManagedTarget, OBJECTREF pObject, ComCallMethod
     }
 #endif // DEBUGGING_SUPPORTED
 
-
-    if (CLRTaskHosted())
-    {
-        InvokeStub_Hosted(pCMD, pManagedTarget, pObject, pFrame, pThread, pRetValOut);
-    }
-    else
-    {
-        InvokeStub(pCMD, pManagedTarget, pObject, pFrame, pThread, pRetValOut);
-    }
-}
-
-bool COMToCLRWorkerBody_SecurityCheck(ComCallMethodDesc * pCMD, MethodDesc * pMD, Thread * pThread, UINT64 * pRetValOut)
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_TRIGGERS;
-        MODE_COOPERATIVE;
-        SO_TOLERANT; 
-    }
-    CONTRACTL_END;
-
-    bool result = true;
-
-    BEGIN_SO_INTOLERANT_CODE_NOTHROW(pThread, { *pRetValOut = COR_E_STACKOVERFLOW; return false; } );
-
-    EX_TRY
-    {
-
-        // Need to check for the presence of a security link demand on the target
-        // method. If we're hosted inside of an app domain with security, we perform
-        // the link demand against that app domain's grant set.
-        Security::CheckLinkDemandAgainstAppDomain(pMD);
-
-        if (pCMD->IsEarlyBoundUnsafe())
-            COMPlusThrow(kSecurityException);
-
-    }
-    EX_CATCH
-    {
-        *pRetValOut = SetupErrorInfo(GET_THROWABLE());
-        result = false;
-    }
-    EX_END_CATCH(SwallowAllExceptions);
-
-    END_SO_INTOLERANT_CODE;
-
-    return result;
+    InvokeStub(pCMD, pManagedTarget, pObject, pFrame, pThread, pRetValOut);
 }
 
 NOINLINE
@@ -508,17 +442,12 @@ void COMToCLRWorkerBody_Rare(Thread * pThread, ComMethodFrame * pFrame, ComCallW
     OBJECTREF pObject;
 
     int fpReturnSize = 0;
-    if (maskedFlags & enum_NeedsSecurityCheck)
-    {
-        if (!COMToCLRWorkerBody_SecurityCheck(pCMD, pRealMD, pThread, pRetValOut))
-            return;
-    }
     if (maskedFlags & enum_NativeR8Retval)
         fpReturnSize = 8;
     if (maskedFlags & enum_NativeR4Retval)
         fpReturnSize = 4;
 
-    maskedFlags &= ~(enum_NeedsSecurityCheck|enum_NativeR4Retval|enum_NativeR8Retval);
+    maskedFlags &= ~(enum_NativeR4Retval|enum_NativeR8Retval);
 
     CONSISTENCY_CHECK(maskedFlags != (                      enum_IsWinRTCtor|enum_IsVirtual));
     CONSISTENCY_CHECK(maskedFlags != (enum_IsDelegateInvoke|enum_IsWinRTCtor|enum_IsVirtual));
@@ -599,7 +528,6 @@ void COMToCLRWorkerBody(
     OBJECTREF pObject;
 
     DWORD mask = (
-        enum_NeedsSecurityCheck |
         enum_IsDelegateInvoke |
         enum_IsWinRTCtor |
         enum_IsVirtual |
@@ -687,62 +615,13 @@ void COMToCLRWorkerBodyWithADTransition(
     BEGIN_SO_INTOLERANT_CODE_NOTHROW(pThread, { *pRetValOut = COR_E_STACKOVERFLOW; return; } );
     EX_TRY
     {
-        bool fNeedToTranslateTAEtoADUE = false;
         ADID pTgtDomain = pWrap->GetDomainID();
         ENTER_DOMAIN_ID(pTgtDomain)
         {
             fEnteredDomain = TRUE;
             COMToCLRWorkerBody_SOIntolerant(pThread, pFrame, pWrap, pRetValOut);
-
-            //
-            // Below is some logic adapted from Thread::RaiseCrossContextExceptionHelper, which we now
-            // bypass because the IL stub is catching the ThreadAbortException instead of a proper domain 
-            // transition, where the logic typically resides.  This code applies some policy to transform 
-            // the ThreadAbortException into an AppDomainUnloadedException and sets up the HRESULT and 
-            // IErrorInfo accordingly.
-            //
-
-            // If the IL stub caught a TAE...
-            if (COR_E_THREADABORTED == ((HRESULT)*pRetValOut))
-            {
-                // ...first, make sure it was actually an HRESULT return value...
-                ComCallMethodDesc* pCMD = pFrame->GetComCallMethodDesc();
-                if (pCMD->IsNativeHResultRetVal()) 
-                {
-                    // There may be multiple AD transitions on the stack so the current unload boundary may
-                    // not be the transition frame that was set up to make our AD switch. Detect that by
-                    // comparing the unload boundary's Next with our ComMethodFrame and proceed to translate
-                    // the exception to ADUE only if they match. Otherwise the exception should stay as TAE.
-
-                    Frame* pUnloadBoundary = pThread->GetUnloadBoundaryFrame();
-                    // ...and we are at an unload boundary with a pending unload...
-                    if (    (    pUnloadBoundary != NULL
-                             && (pUnloadBoundary->Next() == pFrame
-                             &&  pThread->ShouldChangeAbortToUnload(pUnloadBoundary, pUnloadBoundary))
-                            )
-                        // ... or we don't have an unload boundary, but we're otherwise unloading 
-                        //     this domain from another thread (and we aren't the finalizer)...
-                        ||  (   (NULL == pUnloadBoundary)
-                             && (pThread->GetDomain() == SystemDomain::AppDomainBeingUnloaded())
-                             && (pThread != SystemDomain::System()->GetUnloadingThread())
-                             && (pThread != FinalizerThread::GetFinalizerThread())
-                            )
-                       )
-                    {
-                        // ... we take note and then create an ADUE in the domain we're returning to.
-                        fNeedToTranslateTAEtoADUE = true;
-                    }
-                }
-            }
         }
         END_DOMAIN_TRANSITION;
-
-        if (fNeedToTranslateTAEtoADUE)
-        {
-            EEResourceException ex(kAppDomainUnloadedException, W("Remoting_AppDomainUnloaded_ThreadUnwound"));
-            OBJECTREF oEx = CLRException::GetThrowableFromException(&ex);
-            *pRetValOut = SetupErrorInfo(oEx, pFrame->GetComCallMethodDesc());
-        }
     }
     EX_CATCH
     {
@@ -1109,8 +988,6 @@ static void FieldCallWorkerBody(Thread *pThread, ComMethodFrame* pFrame)
     }
     CONTRACTL_END;
     
-    ReverseEnterRuntimeHolder REHolder(TRUE);
-    
     IUnknown** pip = (IUnknown **)pFrame->GetPointerToArguments();
     IUnknown* pUnk = (IUnknown *)*pip; 
     _ASSERTE(pUnk != NULL);
@@ -1131,11 +1008,6 @@ static void FieldCallWorkerBody(Thread *pThread, ComMethodFrame* pFrame)
         ProfilerTransitionCallbackHelper(pMD, pThread, COR_PRF_TRANSITION_CALL);
     }
 #endif // PROFILING_SUPPORTED
-
-    if (pCMD->IsEarlyBoundUnsafe())
-    {
-        COMPlusThrow(kSecurityException);
-    }
 
     UINT64 retVal;
     InvokeStub(pCMD, NULL, pWrap->GetObjectRef(), pFrame, pThread, &retVal);
@@ -1366,20 +1238,6 @@ void ComCallMethodDesc::InitMethod(MethodDesc *pMD, MethodDesc *pInterfaceMD, BO
     {
         // Initialize the native type information size of native stack, native retval flags, etc).
         InitNativeInfo();
-
-        // If this interface method is implemented on a class which lives
-        //  in an assembly without UnmanagedCodePermission, then
-        //  we mark the ComCallMethodDesc as unsafe for being called early-bound.
-        Module* pModule = pMD->GetModule();
-        if (!Security::CanCallUnmanagedCode(pModule))
-        {
-            m_flags |= (enum_NeedsSecurityCheck | enum_IsEarlyBoundUnsafe);
-        }
-        else if (pMD->RequiresLinktimeCheck())
-        {
-            // remember that we have to call Security::CheckLinkDemandAgainstAppDomain at invocation time
-            m_flags |= enum_NeedsSecurityCheck;
-        }
     }
 
     if (pMD->IsEEImpl() && COMDelegate::IsDelegateInvokeMethod(pMD))
@@ -1412,15 +1270,6 @@ void ComCallMethodDesc::InitField(FieldDesc* pFD, BOOL isGetter)
     {
         // Initialize the native type information size of native stack, native retval flags, etc).
         InitNativeInfo();
-        
-        // If this interface method is implemented on a class which lives
-        //  in an assembly without UnmanagedCodePermission, then
-        //  we mark the ComCallMethodDesc as unsafe for being called early-bound.
-        Module* pModule = pFD->GetModule();
-        if (!Security::CanCallUnmanagedCode(pModule))
-        {
-            m_flags |= enum_IsEarlyBoundUnsafe;
-        }
     }
 };
 
@@ -1945,9 +1794,6 @@ MethodDesc* ComCall::GetILStubMethodDesc(MethodDesc *pCallMD, DWORD dwStubFlags)
     }
     CONTRACTL_END;
 
-    PCCOR_SIGNATURE pSig;
-    DWORD           cSig;
-
     // Get the call signature information
     StubSigDesc sigDesc(pCallMD);
 
@@ -2004,7 +1850,6 @@ MethodDesc *ComCall::GetCtorForWinRTFactoryMethod(MethodTable *pClsMT, MethodDes
     SigParser sig(pSig, cSig);
     
     ULONG numArgs;
-    CorElementType et;
 
     IfFailThrow(sig.GetCallingConv(NULL)); // calling convention
     IfFailThrow(sig.GetData(&numArgs));    // number of args

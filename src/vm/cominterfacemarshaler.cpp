@@ -18,11 +18,6 @@
 #include "runtimecallablewrapper.h"
 #include "cominterfacemarshaler.h"
 #include "interopconverter.h"
-#ifdef FEATURE_REMOTING
-#include "remoting.h"
-#include "appdomainhelper.h"
-#include "crossdomaincalls.h"
-#endif
 #include "notifyexternals.h"
 #include "comdelegate.h"
 #include "winrttypenameconverter.h"
@@ -346,21 +341,10 @@ OBJECTREF COMInterfaceMarshaler::GetCCWObject()
     if (m_dwServerSyncBlockIndex != 0)
     {
         AppDomain* pCurrDomain = m_pThread->GetDomain();
-        if (m_dwServerDomainId == pCurrDomain->GetId())
-        {
-            // if we are in the right AD, we know for sure that the object is still alive
-            // since we keep the CCW addref'ed and the AD could not have been unloaded
-            oref = ObjectToOBJECTREF(g_pSyncTable[m_dwServerSyncBlockIndex].m_Object);
-        }
-        else
-        {
-            // otherwise we have to make sure that the AD hasn't been unloaded
-            AppDomainFromIDHolder ad(m_dwServerDomainId, TRUE);
-            if (!ad.IsUnloaded())
-            {
-                oref = ObjectToOBJECTREF(g_pSyncTable[m_dwServerSyncBlockIndex].m_Object);
-            }
-        }
+
+        // if we are in the right AD, we know for sure that the object is still alive
+        // since we keep the CCW addref'ed
+        oref = ObjectToOBJECTREF(g_pSyncTable[m_dwServerSyncBlockIndex].m_Object);
     }
 
     return oref;
@@ -389,111 +373,13 @@ OBJECTREF COMInterfaceMarshaler::HandleInProcManagedComponent()
     }
     else
     {
-#ifdef FEATURE_CORECLR
         _ASSERTE(!"NYI");
         COMPlusThrowHR(COR_E_NOTSUPPORTED);
-#else // FEATURE_CORECLR
-        // TODO: probably we can cache the object on a per App domain bases
-        // using CCW as the key
-        OBJECTREF pwrap = NULL;
-        GCPROTECT_BEGIN(pwrap);
-        {
-            pwrap = GetCCWObject();
-            oref = AppDomainHelper::CrossContextCopyFrom(m_dwServerDomainId, &pwrap);
-        }
-        GCPROTECT_END();
-#endif // FEATURE_CORECLR
     }
     
     return oref;
 }
 
-#ifdef FEATURE_REMOTING
-
-OBJECTREF COMInterfaceMarshaler::GetObjectForRemoteManagedComponentNoThrow()
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_COOPERATIVE;
-    }
-    CONTRACTL_END;
-    
-    OBJECTREF oref = NULL;
-    
-    EX_TRY
-    {
-        oref = GetObjectForRemoteManagedComponent();
-    }
-    EX_CATCH
-    {
-        oref = NULL;
-    }
-    EX_END_CATCH(RethrowTerminalExceptions);
-
-    return oref;
-}
-
-
-//--------------------------------------------------------------------
-// OBJECTREF COMInterfaceMarshaler::GetObjectForRemoteManagedComponent()
-// setup managed proxy to remote object
-//--------------------------------------------------------------------
-OBJECTREF COMInterfaceMarshaler::GetObjectForRemoteManagedComponent()
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_COOPERATIVE;
-        PRECONDITION(m_fIsRemote == true);
-        PRECONDITION(CheckPointer(m_pIManaged));
-    }
-    CONTRACTL_END;
-    
-    OBJECTREF oref = NULL;
-
-    GCPROTECT_BEGIN(oref)
-    {
-        BSTR bstr;
-        HRESULT hr;
-
-        {
-            GCX_PREEMP();
-            hr = m_pIManaged->GetSerializedBuffer(&bstr);
-        }
-
-        if (hr == S_OK)
-        {
-            if (bstr != NULL)
-            {
-                // this could throw an exception
-                // also this would free up the BSTR that we pass in
-                BOOL fLegacyMode = (GetAppDomain()->GetComOrRemotingFlag() == COMorRemoting_LegacyMode);
-                oref = ConvertBSTRToObject(bstr, !fLegacyMode);
-                
-                if (oref != NULL)
-                {
-                    // setup a COM call wrapper
-                    ComCallWrapper* pComCallWrap = ComCallWrapper::InlineGetWrapper(&oref);
-                    _ASSERTE(pComCallWrap != NULL);
-                    
-                    // InlineGetWrapper AddRef's the wrapper
-                    pComCallWrap->Release();
-                }
-            }
-        }
-        else
-        {
-            COMPlusThrowHR(hr);
-        }
-    }   
-    GCPROTECT_END();    
-
-    return oref;
-}
-#endif // FEATURE_REMOTING
 
 //--------------------------------------------------------------------------------
 // void COMInterfaceMarshaler::CreateObjectRef(BOOL fDuplicate, OBJECTREF *pComObj)
@@ -1059,49 +945,6 @@ OBJECTREF COMInterfaceMarshaler::HandleTPComponents()
     }
     CONTRACTL_END;
     
-#ifdef FEATURE_REMOTING
-    OBJECTREF oref = NULL;
-     
-    if (m_fIsRemote || CRemotingServices::IsTransparentProxy(OBJECTREFToObject(GetCCWObject())))
-    {
-        if (!m_fIsRemote)
-        {
-            oref = HandleInProcManagedComponent();
-        }
-        else
-        {            
-            if (!m_typeHandle.IsNull() && !m_typeHandle.IsComObjectType())
-            {
-                // if the user wants explicit calls,
-                // we better serialize/deserialize
-                oref = GetObjectForRemoteManagedComponent();
-            }
-            else
-            {
-                oref = GetObjectForRemoteManagedComponentNoThrow();
-            }
-        }            
-                
-        if (oref != NULL)
-        {
-            OBJECTREF realProxy = ObjectToOBJECTREF(CRemotingServices::GetRealProxy(OBJECTREFToObject(oref)));
-            if(realProxy != NULL)
-            {
-                // call setIUnknown on real proxy    
-                GCPROTECT_BEGIN(oref)
-                {
-                    CRemotingServices::CallSetDCOMProxy(realProxy, m_pUnknown);
-                }
-                GCPROTECT_END();
-                return oref;
-            }                    
-            else
-            {
-                return oref;
-            }
-        }
-    }
-#endif // FEATURE_REMOTING
 
     return NULL;
 }
@@ -1271,7 +1114,7 @@ OBJECTREF COMInterfaceMarshaler::WrapWithComObject()
             &oref,      // pComObj
             NULL,       // ppIncomingIP
             NULL,       // pIncomingItfMT
-            false       // bIncomingIPAdddefed
+            false       // bIncomingIPAddRefed
             );
     }
     GCPROTECT_END();

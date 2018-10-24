@@ -11,7 +11,7 @@
 //*****************************************************************************
 #include "stdafx.h"
 
-extern BOOL STDMETHODCALLTYPE DbgDllMain(HINSTANCE hInstance, DWORD dwReason,
+extern BOOL WINAPI DbgDllMain(HINSTANCE hInstance, DWORD dwReason,
                                          LPVOID lpReserved);
 
 //*****************************************************************************
@@ -21,9 +21,6 @@ extern BOOL STDMETHODCALLTYPE DbgDllMain(HINSTANCE hInstance, DWORD dwReason,
 extern "C"
 BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID lpReserved)
 {
-	//<TODO> Shoud we call DisableThreadLibraryCalls?  Or does this code
-	//	need native thread attatch/detatch notifications? </TODO>
-
 	// Defer to the main debugging code.
     return DbgDllMain(hInstance, dwReason, lpReserved);
 }

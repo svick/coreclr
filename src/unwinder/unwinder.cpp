@@ -34,7 +34,7 @@ HRESULT OOPStackUnwinder::GetModuleBase(      DWORD64  address,
 
 //---------------------------------------------------------------------------------------
 //
-// Given a control PC, return the function entry of the functoin it is in.
+// Given a control PC, return the function entry of the function it is in.
 //
 // Arguments:
 //    address  - the specified IP
@@ -51,7 +51,7 @@ HRESULT OOPStackUnwinder::GetFunctionEntry(                       DWORD64 addres
                                            __out_ecount(cbBuffer) PVOID   pBuffer,
                                                                   DWORD   cbBuffer)
 {
-    if (cbBuffer < sizeof(RUNTIME_FUNCTION))
+    if (cbBuffer < sizeof(T_RUNTIME_FUNCTION))
     {
         return E_INVALIDARG;
     }

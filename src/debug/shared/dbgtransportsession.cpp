@@ -130,6 +130,11 @@ HRESULT DbgTransportSession::Init(DebuggerIPCControlBlock *pDCB, AppDomainEnumer
     m_hSessionOpenEvent = WszCreateEvent(NULL, TRUE, FALSE, NULL); // Manual reset, not signalled
     if (m_hSessionOpenEvent == NULL)
         return E_OUTOFMEMORY;
+#else // RIGHT_SIDE_COMPILE
+    DWORD pid = GetCurrentProcessId(); 
+    if (!m_pipe.CreateServer(pid)) {
+        return E_OUTOFMEMORY;
+    }
 #endif // RIGHT_SIDE_COMPILE
 
     // Allocate some buffers to receive incoming events. The initial number is chosen arbitrarily, tune as
@@ -214,6 +219,8 @@ void DbgTransportSession::Shutdown()
     Release();
 }
 
+#ifndef RIGHT_SIDE_COMPILE
+
 // Cleans up the named pipe connection so no tmp files are left behind. Does only
 // the minimum and must be safe to call at any time. Called during PAL ExitProcess,
 // TerminateProcess and for unhandled native exceptions and asserts.
@@ -222,7 +229,6 @@ void DbgTransportSession::AbortConnection()
     m_pipe.Disconnect();
 }
 
-#ifndef RIGHT_SIDE_COMPILE
 // API used only by the LS to drive the transport into a state where it won't accept connections. This is used
 // when no proxy is detected at startup but it's too late to shutdown all of the debugging system easily. It's
 // mainly paranoia to increase the protection of your system when the proxy isn't started.
@@ -233,9 +239,16 @@ void DbgTransportSession::Neuter()
     // AV on a deallocated handle, which might happen if we simply called Shutdown()).
     m_eState = SS_Closed;
 }
-#endif // !RIGHT_SIDE_COMPILE
 
-#ifdef RIGHT_SIDE_COMPILE
+#else // RIGHT_SIDE_COMPILE
+
+// Used by debugger side (RS) to cleanup the target (LS) named pipes 
+// and semaphores when the debugger detects the debuggee process  exited.
+void DbgTransportSession::CleanupTargetProcess()
+{
+    m_pipe.CleanupTargetProcess();
+}
+
 // On the RS it may be useful to wait and see if the session can reach the SS_Open state. If the target
 // runtime has terminated for some reason then we'll never reach the open state. So the method below gives the
 // RS a way to try and establish a connection for a reasonable amount of time and to time out otherwise. They
@@ -1126,6 +1139,7 @@ DbgTransportSession::Message * DbgTransportSession::RemoveMessageFromSendQueue(D
 #endif
 
 #ifndef RIGHT_SIDE_COMPILE
+
 // Check read and optionally write memory access to the specified range of bytes. Used to check
 // ReadProcessMemory and WriteProcessMemory requests.
 HRESULT DbgTransportSession::CheckBufferAccess(__in_ecount(cbBuffer) PBYTE pbBuffer, DWORD cbBuffer, bool fWriteAccess)
@@ -1138,7 +1152,6 @@ HRESULT DbgTransportSession::CheckBufferAccess(__in_ecount(cbBuffer) PBYTE pbBuf
 
     // VirtualQuery doesn't know much about memory allocated outside of PAL's VirtualAlloc 
     // that's why on Unix we can't rely on in to detect invalid memory reads  
-    // TODO: We need to find and use appropriate memory map API on other operating systems. 
 #ifndef FEATURE_PAL
     do 
     {
@@ -1179,11 +1192,17 @@ HRESULT DbgTransportSession::CheckBufferAccess(__in_ecount(cbBuffer) PBYTE pbBuf
         }
     }
     while (cbBuffer > 0);
+#else
+    if (!PAL_ProbeMemory(pbBuffer, cbBuffer, fWriteAccess))
+    {
+        return HRESULT_FROM_WIN32(ERROR_INVALID_ADDRESS);
+    }
 #endif
 
     // The specified region has passed all of our checks.
     return S_OK;
 }
+
 #endif // !RIGHT_SIDE_COMPILE
 
 // Initialize all session state to correct starting values. Used during Init() and on the LS when we
@@ -1297,7 +1316,8 @@ void DbgTransportSession::TransportWorker()
         else
         {
             DWORD pid = GetCurrentProcessId(); 
-            if (m_pipe.CreateServer(pid) && m_pipe.WaitForConnection())
+            if ((m_pipe.GetState() == TwoWayPipe::Created || m_pipe.CreateServer(pid)) && 
+                 m_pipe.WaitForConnection())
             {
                 eStatus = SCS_Success;
             }

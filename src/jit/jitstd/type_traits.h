@@ -37,6 +37,36 @@ struct remove_cv : remove_const<typename remove_volatile<T>::type>
 };
 
 template <typename T>
+struct remove_reference
+{
+    typedef T type;
+};
+
+template <typename T>
+struct remove_reference<T&>
+{
+    typedef T type;
+};
+
+template <typename T>
+struct remove_reference<T&&>
+{
+    typedef T type;
+};
+
+template <typename T>
+struct is_lvalue_reference
+{
+    enum { value = false };
+};
+
+template <typename T>
+struct is_lvalue_reference<T&>
+{
+    enum { value = true };
+};
+
+template <typename T>
 struct is_unqualified_pointer
 {
     enum { value = false };
@@ -148,19 +178,47 @@ struct make_unsigned<int>
     typedef unsigned int type;
 };
 
-#ifndef PLATFORM_UNIX
+#ifndef _HOST_UNIX_
 
 template<>
 struct make_unsigned<long>
 {
     typedef unsigned long type;
 };
-#endif // PLATFORM_UNIX
+
+#endif // !_HOST_UNIX_
 
 template<>
 struct make_unsigned<__int64>
 {
     typedef unsigned __int64 type;
+};
+
+template<typename Type1>
+struct make_signed
+{
+};
+
+template<>
+struct make_signed<unsigned int>
+{
+    typedef signed int type;
+};
+
+#ifndef _HOST_UNIX_
+
+template<>
+struct make_signed<unsigned long>
+{
+    typedef signed long type;
+};
+
+#endif // !_HOST_UNIX_
+
+template<>
+struct make_signed<unsigned __int64>
+{
+    typedef signed __int64 type;
 };
 
 } // namespace jit_std

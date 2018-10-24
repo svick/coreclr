@@ -66,7 +66,13 @@ enum DictionaryEntryKind
     DeclaringTypeHandleSlot = 7,
 };
 
-#ifndef BINDER
+enum DictionaryEntrySignatureSource : BYTE
+{
+    FromZapImage = 0,
+    FromReadyToRunImage = 1,
+    FromJIT = 2,
+};
+
 class DictionaryEntryLayout
 {
 public:
@@ -76,6 +82,8 @@ public:
     DictionaryEntryKind GetKind();
 
     PTR_VOID m_signature;
+
+    DictionaryEntrySignatureSource m_signatureSource;
 };
 
 typedef DPTR(DictionaryEntryLayout) PTR_DictionaryEntryLayout;
@@ -100,7 +108,19 @@ private:
     WORD m_numSlots;          
 
     // m_numSlots of these
-    DictionaryEntryLayout m_slots[1];   
+    DictionaryEntryLayout m_slots[1];
+
+    static BOOL FindTokenWorker(LoaderAllocator *pAllocator,
+                                DWORD numGenericArgs,
+                                DictionaryLayout *pDictLayout,
+                                CORINFO_RUNTIME_LOOKUP *pResult,
+                                SigBuilder * pSigBuilder,
+                                BYTE * pSig,
+                                DWORD cbSig,
+                                int nFirstOffset,
+                                DictionaryEntrySignatureSource signatureSource,
+                                WORD * pSlotOut);
+
      
 public:
     // Create an initial dictionary layout with a single bucket containing numSlots slots
@@ -115,7 +135,17 @@ public:
                           DictionaryLayout *pDictLayout,
                           CORINFO_RUNTIME_LOOKUP *pResult,
                           SigBuilder * pSigBuilder,
-                          int nFirstOffset);
+                          int nFirstOffset,
+                          DictionaryEntrySignatureSource signatureSource);
+
+    static BOOL FindToken(LoaderAllocator * pAllocator,
+                          DWORD numGenericArgs,
+                          DictionaryLayout * pDictLayout,
+                          CORINFO_RUNTIME_LOOKUP * pResult,
+                          BYTE * signature,
+                          int nFirstOffset,
+                          DictionaryEntrySignatureSource signatureSource,
+                          WORD * pSlotOut);
 
     DWORD GetMaxSlots();
     DWORD GetNumUsedSlots();
@@ -156,7 +186,6 @@ public:
 #endif // FEATURE_PREJIT
 
 };
-#endif // BINDER
 
 
 // The type of dictionaries. This is just an abstraction around an open-ended array
@@ -255,7 +284,10 @@ class Dictionary
                                          MethodTable * pMT,
                                          LPVOID signature,
                                          BOOL nonExpansive,
-                                         DictionaryEntry ** ppSlot);
+                                         DictionaryEntry ** ppSlot,
+                                         DWORD dictionaryIndexAndSlot = -1,
+                                         Module * pModule = NULL);
+
     void PrepopulateDictionary(MethodDesc * pMD,
                                MethodTable * pMT,
                                BOOL nonExpansive);
@@ -264,7 +296,6 @@ class Dictionary
 
   public:
 
-#ifndef BINDER
 #ifdef FEATURE_PREJIT
 
     // Fixup the dictionary entries, including the type arguments
@@ -295,7 +326,6 @@ class Dictionary
                              DWORD numGenericArgs);
     void Restore(DWORD numGenericArgs, ClassLoadLevel level);
 #endif // FEATURE_PREJIT
-#endif // BINDER
 };
 
 #endif

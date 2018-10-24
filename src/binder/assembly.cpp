@@ -16,15 +16,11 @@
 #include "assembly.hpp"
 #include "utils.hpp"
 
-#ifdef FEATURE_LEGACYNETCF
-extern BOOL RuntimeIsLegacyNetCF(DWORD adid);
-#endif
-
 namespace BINDER_SPACE
 {
     namespace
     {
-        BOOL IsPlatformArchicture(PEKIND kArchitecture)
+        BOOL IsPlatformArchitecture(PEKIND kArchitecture)
         {
             return ((kArchitecture != peMSIL) && (kArchitecture != peNone));
         }
@@ -283,13 +279,8 @@ Exit:
     /* static */
     BOOL Assembly::IsValidArchitecture(PEKIND kArchitecture)
     {
-        if (!IsPlatformArchicture(kArchitecture))
+        if (!IsPlatformArchitecture(kArchitecture))
             return TRUE;
-
-#ifdef FEATURE_LEGACYNETCF
-        if (kArchitecture == peI386 && RuntimeIsLegacyNetCF(0))
-            return TRUE;
-#endif
 
         return (kArchitecture == GetSystemArchitecture());
     }
@@ -333,6 +324,11 @@ Exit:
     HRESULT Assembly::GetBinderFlags(DWORD *pBinderFlags)
     {
         return (m_pBinder == NULL) ? E_FAIL : m_pBinder->GetBinderFlags(pBinderFlags);
+    }
+
+    HRESULT Assembly::GetLoaderAllocator(LPVOID* pLoaderAllocator)
+    {
+        return (m_pBinder == NULL) ? E_FAIL : m_pBinder->GetLoaderAllocator(pLoaderAllocator);
     }
 
     HRESULT Assembly::IsShareable(
@@ -394,6 +390,12 @@ Exit:
             AddRef();
             *ppv = this;
         }
+		else if (IsEqualIID(riid, __uuidof(ICLRPrivResource)))
+		{
+			AddRef();
+			// upcasting is safe
+			*ppv = static_cast<ICLRPrivResource *>(this);
+		}
         else if (IsEqualIID(riid, __uuidof(ICLRPrivResourceAssembly)))
         {
             AddRef();

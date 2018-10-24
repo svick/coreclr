@@ -8,6 +8,7 @@
 //
 
 #include "unixasmmacros.inc"
+#include "asmconstants.h"
 
 .syntax unified
 .thumb
@@ -22,58 +23,6 @@
 
 #define CONTEXT_FULL (CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT)
 
-#define CONTEXT_ContextFlags 0
-#define CONTEXT_R0           CONTEXT_ContextFlags+4
-#define CONTEXT_R1           CONTEXT_R0+4
-#define CONTEXT_R2           CONTEXT_R1+4
-#define CONTEXT_R3           CONTEXT_R2+4
-#define CONTEXT_R4           CONTEXT_R3+4
-#define CONTEXT_R5           CONTEXT_R4+4
-#define CONTEXT_R6           CONTEXT_R5+4
-#define CONTEXT_R7           CONTEXT_R6+4
-#define CONTEXT_R8           CONTEXT_R7+4
-#define CONTEXT_R9           CONTEXT_R8+4
-#define CONTEXT_R10          CONTEXT_R9+4
-#define CONTEXT_R11          CONTEXT_R10+4
-#define CONTEXT_R12          CONTEXT_R11+4
-#define CONTEXT_Sp           CONTEXT_R12+4
-#define CONTEXT_Lr           CONTEXT_Sp+4
-#define CONTEXT_Pc           CONTEXT_Lr+4
-#define CONTEXT_Cpsr         CONTEXT_Pc+4
-#define CONTEXT_Fpscr        CONTEXT_Cpsr+4
-#define CONTEXT_Padding      CONTEXT_Fpscr+4
-#define CONTEXT_D0           CONTEXT_Padding+4
-#define CONTEXT_D1           CONTEXT_D0+8
-#define CONTEXT_D2           CONTEXT_D1+8
-#define CONTEXT_D3           CONTEXT_D2+8
-#define CONTEXT_D4           CONTEXT_D3+8
-#define CONTEXT_D5           CONTEXT_D4+8
-#define CONTEXT_D6           CONTEXT_D5+8
-#define CONTEXT_D7           CONTEXT_D6+8
-#define CONTEXT_D8           CONTEXT_D7+8
-#define CONTEXT_D9           CONTEXT_D8+8
-#define CONTEXT_D10          CONTEXT_D9+8
-#define CONTEXT_D11          CONTEXT_D10+8
-#define CONTEXT_D12          CONTEXT_D11+8
-#define CONTEXT_D13          CONTEXT_D12+8
-#define CONTEXT_D14          CONTEXT_D13+8
-#define CONTEXT_D15          CONTEXT_D14+8
-#define CONTEXT_D16          CONTEXT_D15+8
-#define CONTEXT_D17          CONTEXT_D16+8
-#define CONTEXT_D18          CONTEXT_D17+8
-#define CONTEXT_D19          CONTEXT_D18+8
-#define CONTEXT_D20          CONTEXT_D19+8
-#define CONTEXT_D21          CONTEXT_D20+8
-#define CONTEXT_D22          CONTEXT_D21+8
-#define CONTEXT_D23          CONTEXT_D22+8
-#define CONTEXT_D24          CONTEXT_D23+8
-#define CONTEXT_D25          CONTEXT_D24+8
-#define CONTEXT_D26          CONTEXT_D25+8
-#define CONTEXT_D27          CONTEXT_D26+8
-#define CONTEXT_D28          CONTEXT_D27+8
-#define CONTEXT_D29          CONTEXT_D28+8
-#define CONTEXT_D30          CONTEXT_D29+8
-#define CONTEXT_D31          CONTEXT_D30+8
 
 // Incoming:
 //  r0: Context*
@@ -163,7 +112,18 @@ LEAF_END RtlCaptureContext, _TEXT
 //
 LEAF_ENTRY RtlRestoreContext, _TEXT
     END_PROLOGUE
-    
+
+#ifdef HAS_ASAN
+    ldr r2, [r0, #(CONTEXT_ContextFlags)]
+    tst r2, #(CONTEXT_CONTROL)
+    beq     LOCAL_LABEL(Restore_CONTEXT_FLOATING_POINT)
+
+    push {r0, r1}
+    bl EXTERNAL_C_FUNC(__asan_handle_no_return)
+    pop {r0, r1}
+
+LOCAL_LABEL(Restore_CONTEXT_FLOATING_POINT):
+#endif
     ldr r2, [r0, #(CONTEXT_ContextFlags)]
     tst r2, #(CONTEXT_FLOATING_POINT)
     
@@ -192,23 +152,25 @@ LEAF_ENTRY RtlRestoreContext, _TEXT
     ldr R2, [r0, #(CONTEXT_Cpsr)]
     msr APSR, r2    
     
-    mov r12, r0 // ideally we would ldmia r0, {r0-r12, sp, lr, pc} here, but that isn't supported on new clang
-    add r12, CONTEXT_R0 // so we'll burn r12 as the IPC reg for now -- TODO: is this ok?
+    // Ideally, we would like to use `ldmia r0, {r0-r12, sp, lr, pc}` here,
+    // but clang 3.6 and later, as per ARM recommendation, disallows using
+    // Sp in the register list, and Pc and Lr simultaneously.
+    // So we are going to use the IPC register r12 to copy Sp, Lr and Pc
+    // which should be ok -- TODO: Is this really ok?
+    add r12, r0, CONTEXT_R0
     ldm r12, {r0-r11}
-    add r12, (CONTEXT_Sp - CONTEXT_R0)
-    ldr sp, [r12]
-    ldr lr, [r12, #(CONTEXT_Lr - CONTEXT_Sp)]
-    ldr pc, [r12, #(CONTEXT_Pc - CONTEXT_Sp)]
-    
+    ldr sp, [r12, #(CONTEXT_Sp - (CONTEXT_R0))]
+    ldr lr, [r12, #(CONTEXT_Lr - (CONTEXT_R0))]
+    ldr pc, [r12, #(CONTEXT_Pc - (CONTEXT_R0))]
+
 LOCAL_LABEL(No_Restore_CONTEXT_INTEGER):
     
     ldr r2, [r0, #(CONTEXT_Cpsr)]
     msr APSR, r2    
     
-    add r0, CONTEXT_Sp
-    ldr sp, [r0]
-    ldr lr, [r0, #(CONTEXT_Lr - CONTEXT_Sp)]
-    ldr pc, [r0, #(CONTEXT_Pc - CONTEXT_Sp)]
+    ldr sp, [r0, #(CONTEXT_Sp)]
+    ldr lr, [r0, #(CONTEXT_Lr)]
+    ldr pc, [r0, #(CONTEXT_Pc)]
     
 LOCAL_LABEL(No_Restore_CONTEXT_CONTROL):
     ldr r2, [r0, #(CONTEXT_ContextFlags)]

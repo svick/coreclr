@@ -389,7 +389,7 @@ public:
 
 
 // IBCLogger is responsible for collecting profile data.  Logging is turned on by the
-// COMPLUS_ZapBBInstr environment variable, and the actual writing to the file 
+// COMPlus_ZapBBInstr environment variable, and the actual writing to the file 
 // occurs in code:Module.WriteMethodProfileDataLogFile
 class IBCLogger
 {
@@ -599,7 +599,7 @@ public:
         return (dwInstrEnabled != 0);
     }
 
-    Crst * GetSync();
+    static CrstStatic * GetSync();
 
 private:
     void LogMethodAccessHelper(const MethodDesc* pMD, ULONG flagNum);
@@ -614,7 +614,7 @@ private:
 private:
     DWORD dwInstrEnabled;
     
-    Volatile<Crst*> m_sync;
+    static CrstStatic m_sync;
 #endif // DACCESS_COMPILE
 };
 

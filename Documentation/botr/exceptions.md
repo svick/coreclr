@@ -13,7 +13,7 @@ Exceptions matter almost everywhere. They matter the most in functions that thro
 Why are CLR internal exceptions different?
 ==========================================
 
-The CLR's internal exceptions are much like C++ exceptions, but not exactly. Rotor can be built for Mac OSX, for BSD, and for Windows. The OS and compiler differences dictate that we can't just use standard C++ try/catch. In addition, the CLR internal exceptions provide features similar to the managed "finally" and "fault".
+The CLR's internal exceptions are much like C++ exceptions, but not exactly. CoreCLR can be built for Mac OSX, for Linux, for BSD, and for Windows. The OS and compiler differences dictate that we can't just use standard C++ try/catch. In addition, the CLR internal exceptions provide features similar to the managed "finally" and "fault".
 
 With the help of some macros, it is possible to write exception handling code that is almost as easy to write and to read as standard C++.
 
@@ -278,10 +278,16 @@ To use the callout filter, instead of this:
 write this:
 
     BOOL OneShot = TRUE;
+    struct Param {
+        BSTR*  pBSTR;
+        int length;
+    };
+    struct Param param;
+    param.pBSTR = pBSTR;
 
-    PAL_TRY
+    PAL_TRY(Param*, pParam, &param)
     {
-      length = SysStringLen(pBSTR);
+      pParam->length = SysStringLen(pParam->pBSTR);
     }
     PAL_EXCEPT_FILTER(CallOutFilter, &OneShot)
     {

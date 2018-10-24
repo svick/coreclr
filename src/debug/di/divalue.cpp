@@ -1324,8 +1324,11 @@ HRESULT CordbReferenceValue::BuildFromGCHandle(
         NULL, // EnregisteredValueHome * pRemoteRegAddr,        
         &pRefValue);
 
-    pRefValue->QueryInterface(__uuidof(ICorDebugReferenceValue), (void**)pOutRef);
-
+    if (SUCCEEDED(hr))
+    {
+        pRefValue->QueryInterface(__uuidof(ICorDebugReferenceValue), (void**)pOutRef);
+    }
+    
     return hr;
 }
 
@@ -1589,7 +1592,7 @@ void * CordbReferenceValue::GetObjectAddress(MemoryRange localValue)
 void CordbReferenceValue::UpdateTypeInfo()
 {
     // If the object type that we got back is different than the one we sent, then it means that we
-    // orignally had a CLASS and now have something more specific, like a SDARRAY, MDARRAY, or STRING or
+    // originally had a CLASS and now have something more specific, like a SDARRAY, MDARRAY, or STRING or
     // a constructed type.
     // Update our signature accordingly, which is okay since we always have a copy of our sig. This
     // ensures that the reference's signature accurately reflects what the Runtime knows it's pointing

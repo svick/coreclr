@@ -6,8 +6,6 @@
 #if !defined(_EX_H_)
 #define _EX_H_
 
-void RetailAssertIfExpectedClean();             // Defined in src/utilcode/debug.cpp
-
 #ifdef FEATURE_PAL
 #define EX_TRY_HOLDER                                   \
     HardwareExceptionHolder                             \
@@ -18,70 +16,7 @@ void RetailAssertIfExpectedClean();             // Defined in src/utilcode/debug
 #define EX_TRY_HOLDER
 #endif // FEATURE_PAL
 
-#ifdef CLR_STANDALONE_BINDER
-
-#define INCONTRACT(x)
-
-#define EX_THROW(type, value)   throw type(value)
-
-void DECLSPEC_NORETURN ThrowLastError();
-
-#define EX_TRY          \
-    try                 \
-    {                   \
-        EX_TRY_HOLDER   \
-
-#define EX_CATCH_HRESULT(_hr)    } catch (HRESULT hr) { _hr = hr; }
-#define EX_CATCH    } catch(...)
-#define EX_END_CATCH(a)
-#define EX_RETHROW  throw
-#define EX_SWALLOW_NONTERMINAL } catch(...) {}
-#define EX_END_CATCH_UNREACHABLE
-#define EX_CATCH_HRESULT_NO_ERRORINFO(_hr)                                      \
-    EX_CATCH                                                                    \
-    {                                                                           \
-        (_hr) = GET_EXCEPTION()->GetHR();                                       \
-        _ASSERTE(FAILED(_hr));                                                  \
-    }                                                                           \
-    EX_END_CATCH(SwallowAllExceptions)
-
-void DECLSPEC_NORETURN ThrowHR(HRESULT hr);
-inline void DECLSPEC_NORETURN ThrowHR(HRESULT hr, int msgId)
-{
-    throw hr;
-}
-void DECLSPEC_NORETURN ThrowHR(HRESULT hr, SString const &msg);
-
-#define GET_EXCEPTION() ((Exception*)NULL)
-
-void DECLSPEC_NORETURN ThrowWin32(DWORD err);
-
-inline void IfFailThrow(HRESULT hr)
-{
-    WRAPPER_NO_CONTRACT;
-
-    if (FAILED(hr))
-    {
-        ThrowHR(hr);
-    }
-}
-
-/*
-inline HRESULT OutOfMemory()
-{
-    LEAF_CONTRACT;
-    return (E_OUTOFMEMORY);
-}
-*/
-#define COMPlusThrowNonLocalized(key, msg)  throw msg
-
-// Set if fatal error (like stack overflow or out of memory) occurred in this process.
-extern HRESULT g_hrFatalError;
-
-#endif //CLR_STANDALONE_BINDER
-
 #include "sstring.h"
-#ifndef CLR_STANDALONE_BINDER
 #include "crtwrap.h"
 #include "winwrap.h"
 #include "corerror.h"
@@ -93,8 +28,6 @@ extern HRESULT g_hrFatalError;
 #if !defined(_DEBUG_IMPL) && defined(_DEBUG) && !defined(DACCESS_COMPILE)
 #define _DEBUG_IMPL 1
 #endif
-
-#endif //!CLR_STANDALONE_BINDER
 
 
 //=========================================================================================== 
@@ -664,8 +597,6 @@ class OutOfMemoryException : public Exception
     virtual BOOL IsPreallocatedException() { return bIsPreallocated; }
 };
 
-#ifndef CLR_STANDALONE_BINDER
-
 template <typename STATETYPE>
 class CAutoTryCleanup
 {
@@ -788,10 +719,6 @@ private:
 // A lot of existing TRY's swallow terminals right now simply because there is
 // backout code following the END_CATCH that has to be executed. The solution is
 // to replace that backout code with holder objects.
-
-
-// This is a rotten way to define an enum but as long as we're treating
-// "if (optimizabletoconstant)" warnings as fatal errors, we have little choice.
 
 //-----------------------------------------------------------------------
 
@@ -995,7 +922,8 @@ Exception *ExThrowWithInnerHelper(Exception *inner);
                 INDEBUG(static bool __alwayszero;)                                      \
                 INDEBUG(VolatileLoad(&__alwayszero);)                                   \
                 {                                                                       \
-                    /* this is necessary for Rotor exception handling to work */        \
+                    /* Disallow returns to make exception handling work. */             \
+                    /* Some work is done after the catch, see EX_ENDTRY. */             \
                     DEBUG_ASSURE_NO_RETURN_BEGIN(EX_TRY)                                \
                     EX_TRY_HOLDER                                                       \
 
@@ -1046,7 +974,8 @@ Exception *ExThrowWithInnerHelper(Exception *inner);
             INDEBUG(static bool __alwayszero;)                                      \
             INDEBUG(VolatileLoad(&__alwayszero);)                                   \
             {                                                                       \
-                /* this is necessary for Rotor exception handling to work */        \
+                /* Disallow returns to make exception handling work. */             \
+                /* Some work is done after the catch, see EX_ENDTRY. */             \
                 DEBUG_ASSURE_NO_RETURN_BEGIN(EX_TRY)                                \
 
 #define EX_CATCH_IMPL_CPP_ONLY                                                      \
@@ -1260,31 +1189,6 @@ Exception *ExThrowWithInnerHelper(Exception *inner);
             EX_RETHROW;                                                         \
                                                                                 \
         _ASSERTE(FAILED(HR));                                                   \
-        IErrorInfo *pErr = GET_EXCEPTION()->GetErrorInfo();                     \
-        if (pErr != NULL)                                                       \
-        {                                                                       \
-            SetErrorInfo(0, pErr);                                              \
-            pErr->Release();                                                    \
-        }                                                                       \
-    }                                                                           \
-    EX_END_CATCH(SwallowAllExceptions)
-
-
-//===================================================================================
-// Variant of the above Macro for used by ngen and mscorsvc to add
-// a RetailAssert when a reg key is set if we get an unexpected HRESULT
-// from one of the RPC calls.
-//===================================================================================
-
-#define EX_CATCH_HRESULT_AND_NGEN_CLEAN(_hr)                                    \
-    EX_CATCH                                                                    \
-    {                                                                           \
-        (_hr) = GET_EXCEPTION()->GetHR();                                       \
-        RetailAssertIfExpectedClean();                                          \
-        /* Enable this assert after we fix EH so that GetHR() never */          \
-        /* mistakenly returns S_OK */                                           \
-        /***/                                                                   \
-        /* _ASSERTE(FAILED(_hr)); */                                            \
         IErrorInfo *pErr = GET_EXCEPTION()->GetErrorInfo();                     \
         if (pErr != NULL)                                                       \
         {                                                                       \
@@ -1583,5 +1487,4 @@ inline HRESULT IfTransientFailThrow(HRESULT hr)
 // Set if fatal error (like stack overflow or out of memory) occurred in this process.
 GVAL_DECL(HRESULT, g_hrFatalError);
 
-#endif // !CLR_STANDALONE_BINDER
 #endif  // _EX_H_
